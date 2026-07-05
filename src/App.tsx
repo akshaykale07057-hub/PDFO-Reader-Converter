@@ -413,7 +413,7 @@ export default function App() {
   };
 
   const handlePayment = (app: 'phonepe' | 'gpay' | 'upi') => {
-    const amount = selectedPlan === 'yearly' ? 99 : 10;
+    const amount = selectedPlan === 'yearly' ? 49 : 7;
     const upiId = 'akshaykale07057@oksbi';
     const name = 'PDF Reader Pro';
 
@@ -1629,7 +1629,7 @@ export default function App() {
                       )}
                     >
                       <div className="font-bold text-neutral-600">{t('monthly')}</div>
-                      <div className="text-2xl font-display font-bold text-amber-600">10 Rs.</div>
+                      <div className="text-2xl font-display font-bold text-amber-600">7 Rs.</div>
                     </button>
                     <button
                       onClick={() => setSelectedPlan('yearly')}
@@ -1640,7 +1640,7 @@ export default function App() {
                     >
                       <div className="absolute -top-3 bg-amber-500 text-white text-[10px] font-bold px-3 py-1 rounded-full uppercase tracking-wider">{t('bestValue')}</div>
                       <div className="font-bold text-neutral-600">{t('yearly')}</div>
-                      <div className="text-2xl font-display font-bold text-amber-600">99 Rs.</div>
+                      <div className="text-2xl font-display font-bold text-amber-600">49 Rs.</div>
                     </button>
                   </div>
 
@@ -1824,7 +1824,7 @@ export default function App() {
                               <span>Processing Payment...</span>
                             </>
                           ) : (
-                            <span>Pay Rs. {selectedPlan === 'yearly' ? '99' : '10'} Now</span>
+                            <span>Pay Rs. {selectedPlan === 'yearly' ? '49' : '7'} Now</span>
                           )}
                         </button>
                       </form>
