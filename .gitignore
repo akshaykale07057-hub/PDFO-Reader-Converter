@@ -1,0 +1,15 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# Android Release Signing
+android/release-signing.properties
+android/app/release.keystore
+*.keystore
+*.jks
+

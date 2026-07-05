@@ -1,0 +1,96 @@
+apply plugin: 'com.android.application'
+
+android {
+    namespace = "com.pdforeader.app"
+    compileSdk = rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId "com.pdforeader.app"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 1
+        versionName "1.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    signingConfigs {
+        release {
+            // Default placeholder; can be overridden by a properties file or environment variables
+            storeFile file("release.keystore")
+            storePassword "password"
+            keyAlias "release"
+            keyPassword "password"
+
+            // Override with release-signing.properties in the android root directory if it exists
+            def signingPropertiesFile = rootProject.file('release-signing.properties')
+            if (signingPropertiesFile.exists()) {
+                def props = new Properties()
+                signingPropertiesFile.withInputStream { props.load(it) }
+                if (props.containsKey('storeFile')) {
+                    storeFile = file(props['storeFile'])
+                    storePassword = props['storePassword']
+                    keyAlias = props['keyAlias']
+                    keyPassword = props['keyPassword']
+                }
+            }
+
+            // Override with environment variables (ideal for CI/CD pipelines)
+            if (System.getenv("ANDROID_KEYSTORE_PATH") != null) {
+                storeFile = file(System.getenv("ANDROID_KEYSTORE_PATH"))
+            }
+            if (System.getenv("ANDROID_KEYSTORE_PASSWORD") != null) {
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+            }
+            if (System.getenv("ANDROID_KEY_ALIAS") != null) {
+                keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+            }
+            if (System.getenv("ANDROID_KEY_PASSWORD") != null) {
+                keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.release
+        }
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+
+    // Google Mobile Ads Mediation Adapters for AppLovin and Meta (Facebook) Audience Network
+    implementation 'com.google.ads.mediation:applovin:13.0.1.0'
+    implementation 'com.google.ads.mediation:facebook:6.18.0.0'
+}
+
+apply from: 'capacitor.build.gradle'
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}

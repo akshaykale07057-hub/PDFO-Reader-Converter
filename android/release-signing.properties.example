@@ -1,0 +1,16 @@
+# Example android release signing properties
+# Copy this file to release-signing.properties and fill in your actual credentials.
+# Do NOT commit your actual release-signing.properties file to version control!
+
+# The path to your keystore file. 
+# You can use a path relative to the android/app directory (e.g. storeFile=release.keystore) or an absolute path.
+storeFile=release.keystore
+
+# The password for your keystore.
+storePassword=your_keystore_password_here
+
+# The alias name of your key.
+keyAlias=your_key_alias_here
+
+# The password for your key.
+keyPassword=your_key_password_here

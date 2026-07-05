@@ -1,0 +1,27 @@
+# Ignore local node packages and build outputs
+node_modules/
+dist/
+server/node_modules/
+
+# Ignore local upload caches
+server/uploads/*
+!server/uploads/.gitkeep
+
+# Ignore version control and environment files
+.git/
+.gitignore
+.env
+.env*.local
+
+# Ignore logs and temp files
+*.log
+npm-debug.log*
+
+# Ignore editor and local IDE settings
+.vscode/
+.idea/
+.gemini/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
