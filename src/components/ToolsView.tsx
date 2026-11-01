@@ -9,7 +9,7 @@ interface ToolsViewProps {
   language?: string;
 }
 
-export function ToolsView({ onBack, onSelectAction, language = 'English US' }: ToolsViewProps) {
+export const ToolsView = React.memo(function ToolsView({ onBack, onSelectAction, language = 'English US' }: ToolsViewProps) {
   const t = getTranslator(language);
 
   const tools = [
@@ -55,4 +55,4 @@ export function ToolsView({ onBack, onSelectAction, language = 'English US' }: T
       </div>
     </div>
   );
-}
+});

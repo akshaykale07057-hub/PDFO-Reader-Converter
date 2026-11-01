@@ -1,4 +1,4 @@
-import { get, set, del, keys } from 'idb-keyval';
+import { get, set, del, keys, getMany, setMany } from 'idb-keyval';
 import { DocFile } from '../types';
 
 const STORE_NAME = 'real-files';
@@ -12,15 +12,31 @@ export const storageService = {
     }
   },
 
+  async saveFilesBatch(fileList: (DocFile & { data?: Blob })[]): Promise<void> {
+    if (!fileList || fileList.length === 0) return;
+    const entries: [IDBValidKey, any][] = [];
+    for (const file of fileList) {
+      const { id, ...metadata } = file;
+      entries.push([`${id}-meta`, metadata]);
+      if (file.data) {
+        entries.push([`${id}-data`, file.data]);
+      }
+    }
+    await setMany(entries);
+  },
+
   async getFiles(): Promise<DocFile[]> {
     const allKeys = await keys();
     const metaKeys = allKeys.filter(k => typeof k === 'string' && k.endsWith('-meta')) as string[];
-    
+    if (metaKeys.length === 0) return [];
+
+    const allMeta = await getMany(metaKeys);
     const files: DocFile[] = [];
-    for (const key of metaKeys) {
-      const id = key.replace('-meta', '');
-      const meta = await get(key);
+    for (let i = 0; i < metaKeys.length; i++) {
+      const key = metaKeys[i];
+      const meta = allMeta[i];
       if (meta) {
+        const id = key.replace('-meta', '');
         let type = meta.type;
         if (type === 'docx') type = 'doc';
         if (type === 'xlsx' || type === 'xls') type = 'xlsx';
@@ -28,7 +44,7 @@ export const storageService = {
         files.push({ ...meta, id, type });
       }
     }
-    return files.sort((a, b) => (b.lastOpenedAt || b.createdAt) - (a.lastOpenedAt || a.createdAt));
+    return files.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0) || a.name.localeCompare(b.name));
   },
 
   async getFileData(id: string): Promise<Blob | null> {

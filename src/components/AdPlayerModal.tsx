@@ -4,11 +4,11 @@ import { cn } from '../utils/cn';
 
 interface AdPlayerModalProps {
   onComplete: () => void;
-  onGoPro: () => void;
+  onGoPro?: () => void;
   onClose?: () => void;
 }
 
-export const AdPlayerModal: React.FC<AdPlayerModalProps> = ({ onComplete, onGoPro, onClose }) => {
+export const AdPlayerModal: React.FC<AdPlayerModalProps> = ({ onComplete, onClose }) => {
   const [timeLeft, setTimeLeft] = useState(5);
   const [isPlaying, setIsPlaying] = useState(false);
 
@@ -43,7 +43,7 @@ export const AdPlayerModal: React.FC<AdPlayerModalProps> = ({ onComplete, onGoPr
             </div>
             <h2 className="text-2xl font-bold text-white mb-2">Watch Ad to Continue</h2>
             <p className="text-neutral-400 mb-8">
-              Or upgrade to PDF Reader Pro to remove all ads forever!
+              Support free document tools by watching a short video.
             </p>
             
             <div className="flex flex-col w-full gap-4">
@@ -52,13 +52,6 @@ export const AdPlayerModal: React.FC<AdPlayerModalProps> = ({ onComplete, onGoPr
                 className="w-full py-4 bg-white text-black font-bold rounded-2xl active:scale-95 transition-all text-lg"
               >
                 Watch Short Ad (5s)
-              </button>
-              <button 
-                onClick={onGoPro}
-                className="w-full py-4 bg-gradient-to-r from-amber-400 to-amber-500 text-white font-bold rounded-2xl flex items-center justify-center gap-2 active:scale-95 transition-all outline-none"
-              >
-                <Crown size={20} />
-                Get Pro & Remove Ads
               </button>
             </div>
           </div>

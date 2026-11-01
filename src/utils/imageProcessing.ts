@@ -552,3 +552,383 @@ export const rotateImage = (base64Image: string, degrees: number = 90): Promise<
     img.src = base64Image;
   });
 };
+
+// ==========================================
+// DOCUMENT IMAGE FILTERS (CLEAR & VISIBLE)
+// ==========================================
+
+export type FilterType = 'original' | 'clear' | 'bw' | 'grayscale' | 'brighten';
+
+export interface FilterOptions {
+  filter: FilterType;
+  brightness?: number; // Range -50 to +50, default 0
+  contrast?: number;   // Range -50 to +50, default 0
+}
+
+interface BackgroundMap {
+  grid: Float32Array;
+  gw: number;
+  gh: number;
+  blockSize: number;
+}
+
+/**
+ * Computes an adaptive background illumination grid for shadow and uneven lighting correction.
+ */
+function computeBackgroundMap(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  blockSize: number = 48
+): BackgroundMap {
+  const gw = Math.ceil(width / blockSize);
+  const gh = Math.ceil(height / blockSize);
+  const grid = new Float32Array(gw * gh);
+
+  for (let gy = 0; gy < gh; gy++) {
+    const startY = gy * blockSize;
+    const endY = Math.min(height, startY + blockSize);
+    for (let gx = 0; gx < gw; gx++) {
+      const startX = gx * blockSize;
+      const endX = Math.min(width, startX + blockSize);
+
+      // Collect sample luminances across the block to estimate paper background level
+      const samples: number[] = [];
+      const step = Math.max(2, Math.floor(blockSize / 8));
+      for (let y = startY; y < endY; y += step) {
+        const row = y * width;
+        for (let x = startX; x < endX; x += step) {
+          const idx = (row + x) * 4;
+          const lum = data[idx] * 0.299 + data[idx + 1] * 0.587 + data[idx + 2] * 0.114;
+          samples.push(lum);
+        }
+      }
+
+      if (samples.length > 0) {
+        samples.sort((a, b) => a - b);
+        // Use the 90th percentile to isolate paper background without text interference
+        const pIdx = Math.floor(samples.length * 0.90);
+        grid[gy * gw + gx] = Math.max(75, samples[pIdx]);
+      } else {
+        grid[gy * gw + gx] = 200;
+      }
+    }
+  }
+
+  // Smooth the grid with 3x3 box blur to ensure smooth lighting transitions
+  const smoothed = new Float32Array(gw * gh);
+  for (let gy = 0; gy < gh; gy++) {
+    for (let gx = 0; gx < gw; gx++) {
+      let sum = 0;
+      let count = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        const ny = gy + dy;
+        if (ny < 0 || ny >= gh) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = gx + dx;
+          if (nx < 0 || nx >= gw) continue;
+          sum += grid[ny * gw + nx];
+          count++;
+        }
+      }
+      smoothed[gy * gw + gx] = count > 0 ? sum / count : grid[gy * gw + gx];
+    }
+  }
+
+  return { grid: smoothed, gw, gh, blockSize };
+}
+
+/**
+ * Bilinear interpolation of background illumination at pixel (x, y)
+ */
+function getInterpolatedBg(x: number, y: number, bgMap: BackgroundMap): number {
+  const { grid, gw, gh, blockSize } = bgMap;
+  const gx = (x + 0.5) / blockSize - 0.5;
+  const gy = (y + 0.5) / blockSize - 0.5;
+  const gx0 = Math.max(0, Math.min(gw - 1, Math.floor(gx)));
+  const gx1 = Math.min(gw - 1, gx0 + 1);
+  const gy0 = Math.max(0, Math.min(gh - 1, Math.floor(gy)));
+  const gy1 = Math.min(gh - 1, gy0 + 1);
+  const fx = Math.max(0, Math.min(1, gx - gx0));
+  const fy = Math.max(0, Math.min(1, gy - gy0));
+
+  const g00 = grid[gy0 * gw + gx0];
+  const g10 = grid[gy0 * gw + gx1];
+  const g01 = grid[gy1 * gw + gx0];
+  const g11 = grid[gy1 * gw + gx1];
+
+  return (1 - fx) * (1 - fy) * g00 + fx * (1 - fy) * g10 + (1 - fx) * fy * g01 + fx * fy * g11;
+}
+
+/**
+ * Applies unsharp mask sharpening to the pixel data to make text razor sharp.
+ */
+function applyUnsharpMask(
+  srcData: Uint8ClampedArray,
+  dstData: Uint8ClampedArray,
+  width: number,
+  height: number,
+  amount: number = 0.35
+) {
+  for (let y = 1; y < height - 1; y++) {
+    const row = y * width;
+    const rowPrev = (y - 1) * width;
+    const rowNext = (y + 1) * width;
+    for (let x = 1; x < width - 1; x++) {
+      const idx = (row + x) * 4;
+      for (let c = 0; c < 3; c++) {
+        const center = srcData[idx + c];
+        const blur = (
+          srcData[(rowPrev + x) * 4 + c] +
+          srcData[(rowNext + x) * 4 + c] +
+          srcData[(row + x - 1) * 4 + c] +
+          srcData[(row + x + 1) * 4 + c]
+        ) * 0.25;
+        const sharp = center + (center - blur) * amount;
+        dstData[idx + c] = sharp < 0 ? 0 : sharp > 255 ? 255 : Math.round(sharp);
+      }
+      dstData[idx + 3] = 255;
+    }
+  }
+}
+
+/**
+ * Core image processing logic on ImageData.
+ */
+export function applyFilterToImageData(
+  imageData: ImageData,
+  options: FilterOptions
+): ImageData {
+  const { filter, brightness = 0, contrast = 0 } = options;
+  const width = imageData.width;
+  const height = imageData.height;
+  const data = imageData.data;
+
+  // Build brightness/contrast LUT
+  const b = Math.max(-50, Math.min(50, brightness));
+  const c = Math.max(-50, Math.min(50, contrast));
+  const hasAdjustments = b !== 0 || c !== 0;
+  let lut: Uint8ClampedArray | null = null;
+  if (hasAdjustments) {
+    lut = new Uint8ClampedArray(256);
+    const factor = (259 * (c + 255)) / (255 * (259 - c));
+    for (let i = 0; i < 256; i++) {
+      const adjusted = factor * (i - 128) + 128 + b * 1.5;
+      lut[i] = Math.max(0, Math.min(255, Math.round(adjusted)));
+    }
+  }
+
+  if (filter === 'original') {
+    if (lut) {
+      for (let i = 0; i < data.length; i += 4) {
+        data[i] = lut[data[i]];
+        data[i + 1] = lut[data[i + 1]];
+        data[i + 2] = lut[data[i + 2]];
+      }
+    }
+    return imageData;
+  }
+
+  // Adaptive background illumination map for shadow removal & whitening
+  const bgMap = computeBackgroundMap(data, width, height, Math.max(32, Math.floor(Math.min(width, height) / 20)));
+
+  // Output buffer
+  const intermediate = new Uint8ClampedArray(data.length);
+
+  if (filter === 'clear') {
+    // CLEAR & VISIBLE: Magic Color
+    // 1. Remove shadows & paper yellowing by dividing local background
+    // 2. Paper whitening (>205) + text darkening (<150)
+    // 3. Preserve signature/stamp colors with slight saturation boost
+    for (let y = 0; y < height; y++) {
+      const row = y * width;
+      for (let x = 0; x < width; x++) {
+        const idx = (row + x) * 4;
+        const bg = getInterpolatedBg(x, y, bgMap);
+        const normFactor = 255 / Math.max(70, bg);
+
+        let r = Math.min(255, data[idx] * normFactor);
+        let g = Math.min(255, data[idx + 1] * normFactor);
+        let bVal = Math.min(255, data[idx + 2] * normFactor);
+
+        const lum = r * 0.299 + g * 0.587 + bVal * 0.114;
+
+        if (lum > 200) {
+          // Push paper background to clean white
+          const t = (lum - 200) / 55;
+          const mult = 1 + t * 0.28;
+          r = Math.min(255, r * mult);
+          g = Math.min(255, g * mult);
+          bVal = Math.min(255, bVal * mult);
+        } else if (lum < 150) {
+          // Deepen dark text/ink to make letters bold and clear
+          const darkT = lum / 150;
+          const darkMult = 0.76 + darkT * 0.24;
+          r = r * darkMult;
+          g = g * darkMult;
+          bVal = bVal * darkMult;
+        }
+
+        // Saturation preservation (keeps blue pen, stamps, logos crisp)
+        const finalLum = r * 0.299 + g * 0.587 + bVal * 0.114;
+        const sat = 1.15;
+        r = Math.max(0, Math.min(255, finalLum + (r - finalLum) * sat));
+        g = Math.max(0, Math.min(255, finalLum + (g - finalLum) * sat));
+        bVal = Math.max(0, Math.min(255, finalLum + (bVal - finalLum) * sat));
+
+        intermediate[idx] = r;
+        intermediate[idx + 1] = g;
+        intermediate[idx + 2] = bVal;
+        intermediate[idx + 3] = 255;
+      }
+    }
+
+    // Apply sharpening so edges and characters pop
+    applyUnsharpMask(intermediate, data, width, height, 0.4);
+
+  } else if (filter === 'bw') {
+    // B&W DOCUMENT: Pure black text on clean white paper
+    for (let y = 0; y < height; y++) {
+      const row = y * width;
+      for (let x = 0; x < width; x++) {
+        const idx = (row + x) * 4;
+        const bg = getInterpolatedBg(x, y, bgMap);
+        const normFactor = 255 / Math.max(70, bg);
+
+        const r = data[idx] * normFactor;
+        const g = data[idx + 1] * normFactor;
+        const bVal = data[idx + 2] * normFactor;
+        const lum = r * 0.299 + g * 0.587 + bVal * 0.114;
+
+        // Smooth anti-aliased threshold for smooth font edges without aliasing
+        const tLow = 150;
+        const tHigh = 195;
+        let val: number;
+        if (lum <= tLow) {
+          val = 0;
+        } else if (lum >= tHigh) {
+          val = 255;
+        } else {
+          val = Math.round(((lum - tLow) / (tHigh - tLow)) * 255);
+        }
+
+        data[idx] = val;
+        data[idx + 1] = val;
+        data[idx + 2] = val;
+        data[idx + 3] = 255;
+      }
+    }
+
+  } else if (filter === 'grayscale') {
+    // CRISP GRAYSCALE: High clarity monochrome
+    for (let y = 0; y < height; y++) {
+      const row = y * width;
+      for (let x = 0; x < width; x++) {
+        const idx = (row + x) * 4;
+        const bg = getInterpolatedBg(x, y, bgMap);
+        const normFactor = 255 / Math.max(70, bg);
+
+        const r = data[idx] * normFactor;
+        const g = data[idx + 1] * normFactor;
+        const bVal = data[idx + 2] * normFactor;
+        let lum = r * 0.299 + g * 0.587 + bVal * 0.114;
+
+        if (lum > 200) {
+          lum = 200 + (lum - 200) * 1.4;
+        } else if (lum < 140) {
+          lum = lum * 0.82;
+        }
+
+        const val = Math.max(0, Math.min(255, Math.round(lum)));
+        intermediate[idx] = val;
+        intermediate[idx + 1] = val;
+        intermediate[idx + 2] = val;
+        intermediate[idx + 3] = 255;
+      }
+    }
+
+    applyUnsharpMask(intermediate, data, width, height, 0.35);
+
+  } else if (filter === 'brighten') {
+    // BRIGHTEN: Lifts dark shadows & low light photos
+    const gamma = 0.72;
+    for (let i = 0; i < data.length; i += 4) {
+      for (let c = 0; c < 3; c++) {
+        const norm = data[i + c] / 255;
+        const boosted = Math.pow(norm, gamma) * 1.15;
+        data[i + c] = Math.max(0, Math.min(255, Math.round(boosted * 255)));
+      }
+    }
+  }
+
+  // Apply fine-tuned brightness/contrast if specified
+  if (lut) {
+    for (let i = 0; i < data.length; i += 4) {
+      data[i] = lut[data[i]];
+      data[i + 1] = lut[data[i + 1]];
+      data[i + 2] = lut[data[i + 2]];
+    }
+  }
+
+  return imageData;
+}
+
+/**
+ * Applies a filter to an existing HTMLCanvasElement.
+ */
+export function applyFilterToCanvas(
+  canvas: HTMLCanvasElement,
+  options: FilterOptions
+): HTMLCanvasElement {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return canvas;
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  applyFilterToImageData(imageData, options);
+  ctx.putImageData(imageData, 0, 0);
+  return canvas;
+}
+
+/**
+ * Asynchronously applies filter options to a base64 / URL image and resolves to enhanced JPEG data URL.
+ */
+export const applyImageFilter = (
+  imageSource: string,
+  options: FilterOptions
+): Promise<string> => {
+  return new Promise((resolve) => {
+    // Fast path: original with no brightness/contrast adjustments
+    if (options.filter === 'original' && (!options.brightness) && (!options.contrast)) {
+      return resolve(imageSource);
+    }
+
+    const img = new Image();
+    const timeout = setTimeout(() => {
+      resolve(imageSource);
+    }, 4000);
+
+    img.onload = () => {
+      clearTimeout(timeout);
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return resolve(imageSource);
+
+        ctx.drawImage(img, 0, 0);
+        applyFilterToCanvas(canvas, options);
+        resolve(canvas.toDataURL('image/jpeg', 0.92));
+      } catch (err) {
+        console.error("applyImageFilter processing error:", err);
+        resolve(imageSource);
+      }
+    };
+
+    img.onerror = () => {
+      clearTimeout(timeout);
+      resolve(imageSource);
+    };
+
+    img.src = imageSource;
+  });
+};

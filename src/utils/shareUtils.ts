@@ -271,3 +271,111 @@ export const directShareMultipleFiles = async (
     URL.revokeObjectURL(url);
   }
 };
+
+// Robust unified download file function (works seamlessly on Android Capacitor and Web)
+export const downloadDocumentFile = async (
+  file: DocFile,
+  htmlContentFallback?: string
+): Promise<void> => {
+  try {
+    // 1. Retrieve file data
+    let fileData = await storageService.getFileData(file.id);
+    if (!fileData && file.url) {
+      fileData = await storageService.getFileData(file.url);
+    }
+    if (!fileData && file.url && (file.url.startsWith('http') || file.url.startsWith('blob:') || file.url.startsWith('file://'))) {
+      try {
+        const res = await fetch(file.url);
+        if (res.ok) {
+          fileData = await res.blob();
+        }
+      } catch (e) {
+        console.warn("Direct fetch from file.url failed", e);
+      }
+    }
+    if (!fileData) {
+      if (file.id === 'welcome-guide') {
+        fileData = new Blob([htmlContentFallback || "Welcome to PDF Reader Pro!\n\nThis is your secure offline document."], { type: 'application/pdf' });
+      } else if (file.id === 'sample-stats') {
+        fileData = new Blob(['Sample Data'], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      }
+    }
+
+    if (!fileData) {
+      alert(`Could not find document data to download for "${file.name}".`);
+      return;
+    }
+
+    const mimeType = getMimeType(file.name, fileData.type);
+    const typedBlob = new Blob([fileData], { type: mimeType });
+
+    // 2. Native Capacitor download / save to device
+    if (Capacitor.isNativePlatform()) {
+      const base64Data = await convertBlobToBase64(typedBlob);
+      let savedFolder = 'Documents';
+      let success = false;
+
+      // Try Directory.Documents first
+      try {
+        await Filesystem.writeFile({
+          path: file.name,
+          data: base64Data,
+          directory: Directory.Documents,
+          recursive: true
+        });
+        success = true;
+        savedFolder = 'Documents';
+      } catch (e1) {
+        console.warn("Saving to Directory.Documents failed, trying ExternalStorage/Download", e1);
+        try {
+          await Filesystem.writeFile({
+            path: `Download/${file.name}`,
+            data: base64Data,
+            directory: Directory.ExternalStorage,
+            recursive: true
+          });
+          success = true;
+          savedFolder = 'Downloads';
+        } catch (e2) {
+          console.warn("Saving to Download failed, trying Cache and native share/save dialog", e2);
+          try {
+            const cacheResult = await Filesystem.writeFile({
+              path: file.name,
+              data: base64Data,
+              directory: Directory.Cache
+            });
+            await Share.share({
+              title: file.name,
+              url: cacheResult.uri,
+              dialogTitle: `Save ${file.name}`
+            });
+            success = true;
+            savedFolder = 'Device';
+          } catch (e3) {
+            console.error("All native write attempts failed", e3);
+          }
+        }
+      }
+
+      if (success) {
+        alert(`Downloaded successfully! File saved to ${savedFolder}: ${file.name}`);
+      } else {
+        alert(`Failed to save ${file.name} to device storage.`);
+      }
+      return;
+    }
+
+    // 3. Web browser direct download
+    const url = URL.createObjectURL(typedBlob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = file.name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (err: any) {
+    console.error("Failed to download file:", err);
+    alert(err?.message || "Failed to download file.");
+  }
+};

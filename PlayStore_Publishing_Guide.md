@@ -1,4 +1,4 @@
-# Google Play Store Publishing Guide for PDFO Reader
+# Google Play Store Publishing Guide for PDFO Reader & Converter
 
 This guide details the step-by-step process of building, signing, and uploading your Capacitor-wrapped React application to the Google Play Store.
 

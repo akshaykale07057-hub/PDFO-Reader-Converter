@@ -24,17 +24,6 @@ export const scanDeviceForDocuments = async (): Promise<DocFile[]> => {
         console.warn("Standard permission check failed:", e);
     }
 
-    // 2. Request Android 11+ All Files Access if not granted
-    try {
-        const { granted } = await AllFilesAccess.checkPermission();
-        if (!granted) {
-            await AllFilesAccess.requestPermission();
-            return [];
-        }
-    } catch (e) {
-        console.warn("AllFilesAccess check failed:", e);
-    }
-
     const foundFiles: DocFile[] = [];
     // "" reads the root directory, which helps catch documents floating in storage
     const targetFolders = ['', 'Download', 'Documents', 'download', 'documents'];

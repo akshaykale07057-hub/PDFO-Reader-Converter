@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { DocFile } from '../types';
 import { storageService } from '../services/storageService';
-import { directShareFile } from '../utils/shareUtils';
+import { directShareFile, downloadDocumentFile } from '../utils/shareUtils';
 import { getTranslator } from '../utils/translator';
 import * as mammoth from 'mammoth';
 import * as XLSX from 'xlsx';
@@ -16,6 +16,8 @@ import { PDFDocument } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import JSZip from 'jszip';
 import { ZoomPanContainer } from './ZoomPanContainer';
+import { Capacitor } from '@capacitor/core';
+import { Keyboard } from '@capacitor/keyboard';
 
 
 // @ts-ignore
@@ -906,7 +908,7 @@ const parsePptx = async (arrayBuffer: ArrayBuffer) => {
   }
 };
 
-// Canvas page renderer for PDF
+// Canvas page renderer for PDF with Lazy Loading & Memory Optimization
 const PdfPageRenderer: React.FC<{ 
   pdfDoc: any; 
   pageNum: number; 
@@ -914,17 +916,53 @@ const PdfPageRenderer: React.FC<{
   containerWidth: number; 
   isThumbnail?: boolean;
 }> = ({ pdfDoc, pageNum, scale, containerWidth, isThumbnail = false }) => {
+  const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [rendering, setRendering] = useState(true);
+  const [isVisible, setIsVisible] = useState(false);
+  const [rendering, setRendering] = useState(false);
   const [errorRef, setErrorRef] = useState(false);
   const renderTaskRef = useRef<any>(null);
 
+  // Lazy render pages using IntersectionObserver so only visible/near-viewport pages allocate canvas memory
   useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    // Use IntersectionObserver with a generous rootMargin so pages pre-render before scrolling into view
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            setIsVisible(true);
+          } else if (!isThumbnail) {
+            // Free canvas bitmap when scrolled far off-screen to prevent mobile OOM crashes
+            setIsVisible(false);
+          }
+        });
+      },
+      { rootMargin: isThumbnail ? '100px 0px' : '400px 0px' }
+    );
+
+    observer.observe(el);
+    return () => {
+      observer.disconnect();
+    };
+  }, [isThumbnail]);
+
+  useEffect(() => {
+    if (!isVisible) {
+      if (renderTaskRef.current) {
+        renderTaskRef.current.cancel();
+      }
+      return;
+    }
+
     let active = true;
 
     const render = async () => {
       try {
         setRendering(true);
+        setErrorRef(false);
         const page = await pdfDoc.getPage(pageNum);
         if (!active) return;
 
@@ -934,13 +972,15 @@ const PdfPageRenderer: React.FC<{
         const context = canvas.getContext('2d');
         if (!context) return;
 
-        const zoomMultiplier = isThumbnail ? 1.0 : 2.0;
+        // Balanced zoom multiplier: 1.0 for thumbnail, 1.25 for regular pages
+        const zoomMultiplier = isThumbnail ? 1.0 : 1.25;
         const baseViewport = page.getViewport({ scale: 1 });
         const widthScale = containerWidth > 0 ? (containerWidth / baseViewport.width) : 1;
         const finalScale = widthScale * scale * zoomMultiplier;
         const viewport = page.getViewport({ scale: finalScale });
 
-        const dpr = window.devicePixelRatio || 1;
+        // Cap DPR to 2 max to prevent massive canvas memory allocations on 3x-4x mobile screens
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
         canvas.width = viewport.width * dpr;
         canvas.height = viewport.height * dpr;
         canvas.style.width = `${viewport.width / zoomMultiplier}px`;
@@ -978,40 +1018,60 @@ const PdfPageRenderer: React.FC<{
         renderTaskRef.current.cancel();
       }
     };
-  }, [pdfDoc, pageNum, scale, containerWidth]);
+  }, [isVisible, pdfDoc, pageNum, scale, containerWidth, isThumbnail]);
 
   if (isThumbnail) {
     return (
-      <div className="relative w-full h-full flex items-center justify-center overflow-hidden bg-white">
-        {rendering && (
-          <div className="absolute inset-0 flex items-center justify-center bg-white/50 backdrop-blur-[1px] z-10">
-            <Loader2 size={16} className="text-blue-600 animate-spin" />
-          </div>
-        )}
-        {errorRef ? (
-          <div className="text-[10px] text-red-500 font-bold p-1">Error</div>
+      <div ref={containerRef} className="relative w-full h-full flex items-center justify-center overflow-hidden bg-white">
+        {isVisible ? (
+          <>
+            {rendering && (
+              <div className="absolute inset-0 flex items-center justify-center bg-white/50 backdrop-blur-[1px] z-10">
+                <Loader2 size={16} className="text-blue-600 animate-spin" />
+              </div>
+            )}
+            {errorRef ? (
+              <div className="text-[10px] text-red-500 font-bold p-1">Error</div>
+            ) : (
+              <canvas ref={canvasRef} className="max-h-full max-w-full object-contain" />
+            )}
+          </>
         ) : (
-          <canvas ref={canvasRef} className="max-h-full max-w-full object-contain" />
+          <div className="w-full h-full bg-neutral-100 flex items-center justify-center">
+            <span className="text-[10px] text-neutral-400 font-mono">{pageNum}</span>
+          </div>
         )}
       </div>
     );
   }
 
   return (
-    <div className="bg-white p-1 sm:p-3 border border-neutral-200/70 shadow-sm rounded-lg sm:rounded-xl flex flex-col items-center justify-center min-h-[200px] sm:min-h-[300px] relative w-full mb-4 sm:mb-6 max-w-lg mx-auto overflow-hidden">
-      {rendering && (
-        <div className="absolute inset-0 flex items-center justify-center bg-white/50 backdrop-blur-[1px] z-10 rounded-lg sm:rounded-xl border border-neutral-200/70">
-          <Loader2 size={24} className="text-blue-600 animate-spin" />
+    <div 
+      ref={containerRef} 
+      className="bg-white p-1 sm:p-3 border border-neutral-200/70 shadow-sm rounded-lg sm:rounded-xl flex flex-col items-center justify-center min-h-[320px] sm:min-h-[420px] relative w-full mb-4 sm:mb-6 max-w-lg mx-auto overflow-hidden"
+    >
+      {isVisible ? (
+        <>
+          {rendering && (
+            <div className="absolute inset-0 flex items-center justify-center bg-white/50 backdrop-blur-[1px] z-10 rounded-lg sm:rounded-xl border border-neutral-200/70">
+              <Loader2 size={24} className="text-blue-600 animate-spin" />
+            </div>
+          )}
+          {errorRef ? (
+            <div className="text-sm text-red-500 font-medium font-sans py-8">Failed to display Page {pageNum}</div>
+          ) : (
+            <canvas ref={canvasRef} className="max-w-full rounded-lg sm:rounded-xl w-full" />
+          )}
+          <div className="mt-2.5 mb-1 text-[10px] text-neutral-400 font-bold uppercase tracking-widest font-mono select-none">
+            Page {pageNum} of {pdfDoc.numPages}
+          </div>
+        </>
+      ) : (
+        <div className="flex flex-col items-center justify-center h-[320px] text-neutral-300">
+          <Loader2 size={20} className="animate-spin text-neutral-300 mb-2" />
+          <span className="text-xs font-mono font-medium">Page {pageNum}</span>
         </div>
       )}
-      {errorRef ? (
-        <div className="text-sm text-red-500 font-medium font-sans py-8">Failed to display Page {pageNum}</div>
-      ) : (
-        <canvas ref={canvasRef} className="max-w-full rounded-lg sm:rounded-xl w-full" />
-      )}
-      <div className="mt-2.5 mb-1 text-[10px] text-neutral-400 font-bold uppercase tracking-widest font-mono select-none">
-        Page {pageNum} of {pdfDoc.numPages}
-      </div>
     </div>
   );
 };
@@ -1960,6 +2020,52 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
   const [pdfBuffer, setPdfBuffer] = useState<ArrayBuffer | null>(null);
   const [isVerifying, setIsVerifying] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [modalHeight, setModalHeight] = useState<number>(() => {
+    if (typeof window !== 'undefined') {
+      return window.visualViewport ? window.visualViewport.height : window.innerHeight;
+    }
+    return 800;
+  });
+  const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const handleResize = () => {
+      const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+      setModalHeight(vh);
+      const kbOpen = (window.innerHeight - vh) > 120;
+      setIsKeyboardOpen(kbOpen);
+    };
+
+    handleResize();
+    window.visualViewport?.addEventListener('resize', handleResize);
+    window.visualViewport?.addEventListener('scroll', handleResize);
+    window.addEventListener('resize', handleResize);
+
+    let showSub: any;
+    let hideSub: any;
+    try {
+      showSub = Keyboard.addListener('keyboardWillShow', (info: any) => {
+        setIsKeyboardOpen(true);
+        if (info?.keyboardHeight > 0) {
+          setModalHeight(Math.max(200, window.innerHeight - info.keyboardHeight));
+        }
+      });
+      hideSub = Keyboard.addListener('keyboardWillHide', () => {
+        setIsKeyboardOpen(false);
+        setModalHeight(window.innerHeight);
+      });
+    } catch (_) {}
+
+    return () => {
+      window.visualViewport?.removeEventListener('resize', handleResize);
+      window.visualViewport?.removeEventListener('scroll', handleResize);
+      window.removeEventListener('resize', handleResize);
+      showSub?.then((h: any) => h.remove?.());
+      hideSub?.then((h: any) => h.remove?.());
+    };
+  }, []);
 
   // State variables for server-side high-fidelity PDF loading & conversion
   const [highFidelityPdf, setHighFidelityPdf] = useState<{
@@ -2875,6 +2981,13 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
     e.preventDefault();
     if (!pdfBuffer) return;
 
+    if (Capacitor.isNativePlatform()) {
+      Keyboard.hide().catch(() => {});
+    }
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+
     setIsVerifying(true);
     setError(null);
     try {
@@ -2947,14 +3060,8 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
     }
   };
 
-  const handleDownload = () => {
-    if (!blobUrl) return;
-    const a = document.createElement('a');
-    a.href = blobUrl;
-    a.download = file.name;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+  const handleDownload = async () => {
+    await downloadDocumentFile(file, htmlContent || undefined);
   };
 
   const handleShare = async () => {
@@ -2978,6 +3085,80 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
   };
 
   const renderContent = () => {
+    if (isProtected) {
+      return (
+        <div className="w-full h-full flex flex-col items-center justify-center p-3 sm:p-6 bg-neutral-50 overflow-hidden select-none">
+          <div className="w-full max-w-sm bg-white p-4 sm:p-7 rounded-2xl sm:rounded-3xl shadow-xl border border-neutral-200/90 flex flex-col items-center text-center shrink-0">
+            {isKeyboardOpen ? (
+              <div className="flex items-center gap-2.5 mb-2.5 shrink-0">
+                <div className="w-8 h-8 bg-red-50 rounded-xl flex items-center justify-center text-red-500 shrink-0">
+                  <Lock size={16} />
+                </div>
+                <h3 className="text-base font-bold text-neutral-900 tracking-tight">Password Protected</h3>
+              </div>
+            ) : (
+              <>
+                <div className="w-14 h-14 bg-red-50 rounded-2xl flex items-center justify-center text-red-500 mb-3 group shrink-0">
+                  <Lock className="w-7 h-7 group-hover:hidden transition-all" />
+                  <Unlock className="w-7 h-7 hidden group-hover:block transition-all" />
+                </div>
+                <h3 className="text-lg sm:text-xl font-bold text-neutral-900 mb-1 shrink-0">Password Protected</h3>
+                <p className="text-neutral-500 text-xs sm:text-sm mb-4 leading-relaxed max-w-xs shrink-0">
+                  This PDF is encrypted for security. Enter the password below to unlock and view the content.
+                </p>
+              </>
+            )}
+
+            <form onSubmit={handleUnlock} className="w-full space-y-2.5 sm:space-y-3.5">
+              <div className="relative">
+                <input 
+                  type={showPassword ? "text" : "password"}
+                  value={enteredPassword}
+                  onChange={(e) => setEnteredPassword(e.target.value)}
+                  placeholder="Enter Master Password"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
+                  className="w-full px-4 py-2.5 sm:py-3.5 bg-neutral-50 border border-neutral-200 rounded-xl sm:rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none transition-all pr-11 font-medium placeholder:text-neutral-400 text-sm sm:text-base text-neutral-900"
+                />
+                <button 
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600 transition-colors p-1"
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                >
+                  {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                </button>
+              </div>
+              
+              {error && (
+                <div className="flex items-center gap-1.5 text-red-500 text-xs font-bold justify-center py-0.5">
+                  <ShieldAlert size={14} className="shrink-0" />
+                  <span>{error}</span>
+                </div>
+              )}
+
+              <button 
+                type="submit"
+                disabled={isVerifying || !enteredPassword}
+                className="w-full bg-neutral-900 text-white py-2.5 sm:py-3.5 rounded-xl sm:rounded-2xl font-bold hover:bg-black transition-all flex items-center justify-center gap-2 disabled:opacity-50 active:scale-[0.98] text-sm sm:text-base shadow-sm cursor-pointer"
+              >
+                {isVerifying ? <Loader2 size={16} className="animate-spin" /> : <Unlock size={16} />}
+                {isVerifying ? 'Verifying...' : 'Unlock Document'}
+              </button>
+            </form>
+
+            {!isKeyboardOpen && (
+              <div className="mt-4 pt-3 border-t border-neutral-100 w-full shrink-0">
+                <p className="text-[10px] text-neutral-400 font-bold uppercase tracking-widest font-mono">Secure Document Viewer</p>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
     if (isConverting && conversionStatus === 'converting') {
       return (
         <div className="flex flex-col items-center justify-center h-full space-y-6 bg-neutral-50 animate-fade-in">
@@ -3168,68 +3349,7 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
       );
     }
 
-    if (isProtected) {
-      return (
-        <div className="flex flex-col items-center justify-center h-full p-8 bg-neutral-50 animate-fade-in">
-          <motion.div 
-            initial={{ scale: 0.9, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            className="w-full max-w-sm bg-white p-8 rounded-3xl shadow-xl border border-neutral-100 flex flex-col items-center text-center"
-          >
-            <div className="w-16 h-16 bg-red-50 rounded-2xl flex items-center justify-center text-red-500 mb-6 group">
-               <Lock size={32} className="group-hover:hidden transition-all" />
-               <Unlock size={32} className="hidden group-hover:block transition-all" />
-            </div>
-            <h3 className="text-xl font-bold text-neutral-900 mb-2">Password Protected</h3>
-            <p className="text-neutral-500 text-sm mb-8 leading-relaxed">This PDF is encrypted for security. Enter the password below to unlock and view the content.</p>
-            
-            <form onSubmit={handleUnlock} className="w-full space-y-4">
-               <div className="relative">
-                  <input 
-                    type={showPassword ? "text" : "password"}
-                    value={enteredPassword}
-                    onChange={(e) => setEnteredPassword(e.target.value)}
-                    placeholder="Enter Master Password"
-                    autoFocus
-                    className="w-full px-5 py-4 bg-neutral-50 border border-neutral-200 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none transition-all pr-12 font-medium placeholder:text-neutral-300"
-                  />
-                  <button 
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-4 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600 transition-colors"
-                  >
-                    {showPassword ? <EyeOff size={20} /> : <Eye size={20} />}
-                  </button>
-               </div>
-               
-               {error && (
-                 <motion.div 
-                   initial={{ opacity: 0, y: -5 }}
-                   animate={{ opacity: 1, y: 0 }}
-                   className="flex items-center gap-2 text-red-500 text-xs font-bold justify-center"
-                 >
-                    <ShieldAlert size={14} />
-                    {error}
-                 </motion.div>
-               )}
 
-               <button 
-                 type="submit"
-                 disabled={isVerifying || !enteredPassword}
-                 className="w-full bg-neutral-900 text-white py-4 rounded-2xl font-bold hover:bg-black transition-all flex items-center justify-center gap-2 disabled:opacity-50 active:scale-[0.98]"
-               >
-                 {isVerifying ? <Loader2 size={20} className="animate-spin" /> : <Unlock size={20} />}
-                 {isVerifying ? 'Verifying...' : 'Unlock Document'}
-               </button>
-            </form>
-
-            <div className="mt-8 pt-8 border-t border-neutral-100 w-full">
-               <p className="text-[10px] text-neutral-400 font-bold uppercase tracking-widest">Secure Document Viewer</p>
-            </div>
-          </motion.div>
-        </div>
-       );
-     }
 
     // Render custom HTML welcome guide if set
     if (file.id === 'welcome-guide' && htmlContent) {
@@ -4547,15 +4667,20 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
   };
 
   return (
-    <motion.div 
-      initial={{ opacity: 0, y: 50 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: 50 }}
-      className="fixed inset-0 z-[60] bg-neutral-50 flex flex-col"
+    <div 
+      style={{ 
+        height: `${modalHeight}px`,
+        maxHeight: `${modalHeight}px`,
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 'auto'
+      }}
+      className="fixed z-[60] bg-neutral-50 flex flex-col overflow-hidden select-none"
       translate="no"
       lang="en"
     >
-      <div className="bg-white border-b border-neutral-200 px-4 py-3 flex justify-between items-center z-10 shadow-sm shrink-0">
+      <div className="bg-white border-b border-neutral-200 px-4 py-2.5 sm:py-3 flex justify-between items-center z-10 shadow-sm shrink-0">
         <div className="flex items-center gap-3">
           <button onClick={onClose} className="p-2 -ml-2 rounded-full hover:bg-neutral-100 text-neutral-600 transition-colors">
             <ChevronLeft size={24} />
@@ -4617,9 +4742,16 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
         </div>
       </div>
       
-      <div ref={containerRef} className="flex-1 overflow-auto no-scrollbar relative bg-neutral-50">
+      <div 
+        ref={containerRef} 
+        className={`flex-1 relative bg-neutral-50 w-full ${
+          isProtected 
+            ? 'flex flex-col items-center justify-center overflow-hidden p-2 sm:p-6' 
+            : 'overflow-y-auto overflow-x-hidden no-scrollbar'
+        }`}
+      >
          {renderContent()}
       </div>
-    </motion.div>
+    </div>
   );
 };

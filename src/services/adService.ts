@@ -5,11 +5,14 @@ class AdService {
   private isInitialized = false;
   private isProUser = false;
   private isInterstitialReady = false;
+  private lastAdShownTime = 0;
+  // 3-minute cooldown (180,000 ms) to avoid spamming ads when switching apps or using camera
+  private readonly RESUME_AD_COOLDOWN_MS = 3 * 60 * 1000;
 
-  // Test Ad Unit IDs provided by Google AdMob for safety during development
+  // Production Ad Unit IDs provided by Google AdMob
   private adIds = {
-    banner: 'ca-app-pub-3940256099942544/6300978111',
-    interstitial: 'ca-app-pub-3940256099942544/1033173712',
+    banner: 'ca-app-pub-9248966687813984/8041522919',
+    interstitial: 'ca-app-pub-9248966687813984/3599715027',
   };
 
   /**
@@ -68,7 +71,7 @@ class AdService {
     try {
       await AdMob.prepareInterstitial({
         adId: this.adIds.interstitial,
-        isTesting: true,
+        isTesting: false,
       });
     } catch (e) {
       console.warn('Preload interstitial failed:', e);
@@ -86,7 +89,7 @@ class AdService {
         adSize: BannerAdSize.ADAPTIVE_BANNER,
         position: BannerAdPosition.BOTTOM_CENTER,
         margin: 0,
-        isTesting: true
+        isTesting: false
       });
       console.log('Banner ad shown');
     } catch (e) {
@@ -125,7 +128,7 @@ class AdService {
         if (!this.isInterstitialReady) {
           await AdMob.prepareInterstitial({
             adId: this.adIds.interstitial,
-            isTesting: true
+            isTesting: false
           });
         }
 
@@ -140,13 +143,16 @@ class AdService {
           onComplete();
         });
 
+        this.lastAdShownTime = Date.now();
         await AdMob.showInterstitial();
       } catch (e) {
+        this.lastAdShownTime = Date.now();
         console.warn('Failed to show native interstitial, proceeding to simulated ad:', e);
         const event = new CustomEvent('show-simulated-ad', { detail: { onComplete } });
         window.dispatchEvent(event);
       }
     } else {
+      this.lastAdShownTime = Date.now();
       // Trigger simulated ad overlay on web/non-native platform
       const event = new CustomEvent('show-simulated-ad', { detail: { onComplete } });
       window.dispatchEvent(event);
@@ -154,17 +160,24 @@ class AdService {
   }
 
   /**
-   * Shows an App Open ad on app resume.
-   * We fallback to full-screen Interstitial ad since App Open Ads are not supported by the plugin version.
+   * Shows an App Open ad on app resume with a 3-minute frequency cap.
+   * This prevents spamming users with ads when quickly switching apps or taking a photo.
    */
   async showAppOpenAd() {
     if (!this.isInitialized || this.isProUser) return;
+
+    const now = Date.now();
+    if (now - this.lastAdShownTime < this.RESUME_AD_COOLDOWN_MS) {
+      console.log('App Open ad skipped: cooldown active to prevent ad spam');
+      return;
+    }
 
     try {
       if (!this.isInterstitialReady) {
         await this.preloadInterstitial();
       }
       
+      this.lastAdShownTime = now;
       await AdMob.showInterstitial();
       console.log('App Open (Interstitial) Ad shown on resume');
     } catch (e) {

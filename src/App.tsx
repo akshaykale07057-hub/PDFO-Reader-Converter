@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback, Suspense } from 'react';
 import {
   Home,
   Files,
@@ -13,7 +13,6 @@ import {
   X,
   Merge,
   Scissors,
-  Crown,
   Globe,
   Share2,
   Star,
@@ -21,12 +20,8 @@ import {
   Shield,
   ChevronRight,
   Check,
-  Smartphone,
-  Wallet,
   Loader2,
   Wrench,
-  ChevronDown,
-  ChevronUp,
   FilePlus,
   FolderOpen,
   ShieldCheck,
@@ -35,32 +30,40 @@ import {
   Download,
   QrCode,
   Database,
-  Copy,
-  ExternalLink,
-  CreditCard
+  ExternalLink
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Capacitor } from '@capacitor/core';
-import { AppLauncher } from '@capacitor/app-launcher';
 import { App as CapApp } from '@capacitor/app';
+import { Share } from '@capacitor/share';
+import { SplashScreen } from '@capacitor/splash-screen';
 import { DocFile, TabType } from './types';
 import { storageService } from './services/storageService';
 import { adService } from './services/adService';
-import { ScanView } from './components/ScanView';
-import { CompressorView } from './components/CompressorView';
-import { MergeView } from './components/MergeView';
-import { SplitView } from './components/SplitView';
-import { QRScannerView } from './components/QRScannerView';
 import { FileList } from './components/FileList';
 import { ToolsView } from './components/ToolsView';
 import { scanDeviceForDocuments } from './folderscan/FileScanner';
-import { GenericToolFeature } from './components/GenericToolFeature';
-import { AdPlayerModal } from './components/AdPlayerModal';
-import { DocumentViewerModal } from './components/DocumentViewerModal';
-import { directShareFile, directShareMultipleFiles } from './utils/shareUtils';
+import { directShareFile, directShareMultipleFiles, downloadDocumentFile } from './utils/shareUtils';
 import { cn } from './utils/cn';
 import { formatFileSize } from './utils/fileUtils';
 import { getTranslator, LANGUAGE_DISPLAY_NAMES } from './utils/translator';
+
+const DocumentViewerModal = React.lazy(() => import('./components/DocumentViewerModal').then(m => ({ default: m.DocumentViewerModal })));
+const ScanView = React.lazy(() => import('./components/ScanView').then(m => ({ default: m.ScanView })));
+const GenericToolFeature = React.lazy(() => import('./components/GenericToolFeature').then(m => ({ default: m.GenericToolFeature })));
+const QRScannerView = React.lazy(() => import('./components/QRScannerView').then(m => ({ default: m.QRScannerView })));
+const CompressorView = React.lazy(() => import('./components/CompressorView').then(m => ({ default: m.CompressorView })));
+const MergeView = React.lazy(() => import('./components/MergeView').then(m => ({ default: m.MergeView })));
+const SplitView = React.lazy(() => import('./components/SplitView').then(m => ({ default: m.SplitView })));
+const AdPlayerModal = React.lazy(() => import('./components/AdPlayerModal').then(m => ({ default: m.AdPlayerModal })));
+
+const ViewSuspenseFallback = () => (
+  <div className="fixed inset-0 z-50 bg-white/90 backdrop-blur-xs flex flex-col items-center justify-center p-6">
+    <div className="w-14 h-14 rounded-2xl bg-white shadow-xl flex items-center justify-center border border-neutral-100">
+      <Loader2 className="w-7 h-7 text-red-500 animate-spin" strokeWidth={2.5} />
+    </div>
+  </div>
+);
 
 // No initial files to ensure real experience
 const INITIAL_FILES: DocFile[] = [];
@@ -78,12 +81,7 @@ export default function App() {
   const [showSplit, setShowSplit] = useState(false);
   const [showQRScanner, setShowQRScanner] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [isPro, setIsPro] = useState(false);
-
-  useEffect(() => {
-    adService.setPro(isPro);
-  }, [isPro]);
-
+  const [showAppSplash, setShowAppSplash] = useState(true);
   const [adBannerHeight, setAdBannerHeight] = useState(0);
 
   useEffect(() => {
@@ -110,68 +108,27 @@ export default function App() {
     };
   }, []);
 
-  const [isPromoExpanded, setIsPromoExpanded] = useState(false);
+  useEffect(() => {
+    if (viewingDoc) {
+      adService.hideBanner();
+    } else {
+      adService.showBanner();
+    }
+  }, [viewingDoc]);
+
   const [activeToolAction, setActiveToolAction] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [isScanning, setIsScanning] = useState(false);
-  const [activeSettingsModal, setActiveSettingsModal] = useState<'pro' | 'language' | 'feedback' | 'rate' | 'privacy' | 'payment' | null>(null);
-  const [selectedPlan, setSelectedPlan] = useState<'monthly' | 'yearly'>('yearly');
+  const [activeSettingsModal, setActiveSettingsModal] = useState<'language' | 'feedback' | 'rate' | 'privacy' | null>(null);
   const [rating, setRating] = useState(0);
   const [feedbackText, setFeedbackText] = useState('');
   const [activeCategory, setActiveCategory] = useState<string>('All');
   const [adCallback, setAdCallback] = useState<{ run: () => void } | null>(null);
   const [selectedLanguage, setSelectedLanguage] = useState(() => localStorage.getItem('selected_language') || 'English US');
-  const [isUpiExpanded, setIsUpiExpanded] = useState(false);
-  const [isCardExpanded, setIsCardExpanded] = useState(false);
-  const [cardNumber, setCardNumber] = useState('');
-  const [cardExpiry, setCardExpiry] = useState('');
-  const [cardCvv, setCardCvv] = useState('');
-  const [isProcessingCard, setIsProcessingCard] = useState(false);
-
-  const handleCardPayment = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!cardNumber || !cardExpiry || !cardCvv) {
-      alert("Please fill in all card details.");
-      return;
-    }
-    setIsProcessingCard(true);
-    setTimeout(() => {
-      setIsProcessingCard(false);
-      setIsPro(true);
-      alert('Card Payment Successful!');
-      setCardNumber('');
-      setCardExpiry('');
-      setCardCvv('');
-      setIsCardExpanded(false);
-      setActiveSettingsModal(null);
-      setShowSettings(false);
-    }, 2000);
-  };
-
-  const [upiId, setUpiId] = useState('');
-  const [isProcessingUpiId, setIsProcessingUpiId] = useState(false);
-
-  const handleUpiIdPayment = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!upiId || !upiId.includes('@')) {
-      alert("Please enter a valid UPI ID (e.g., username@bank).");
-      return;
-    }
-    setIsProcessingUpiId(true);
-    setTimeout(() => {
-      setIsProcessingUpiId(false);
-      setIsPro(true);
-      alert('UPI ID Payment Successful!');
-      setUpiId('');
-      setIsUpiExpanded(false);
-      setActiveSettingsModal(null);
-      setShowSettings(false);
-    }, 2000);
-  };
 
   const mainRef = useRef<HTMLDivElement>(null);
   const isScanningRef = useRef(false);
-  const handleAutoScanRef = useRef<() => void>(() => {});
+  const handleAutoScanRef = useRef<(isRetry?: boolean, isInitial?: boolean) => void>(() => {});
 
   useEffect(() => {
     handleAutoScanRef.current = handleAutoScan;
@@ -195,15 +152,43 @@ export default function App() {
     }
   }, [activeTab]);
 
-  const handleTabClick = (tab: TabType) => {
-    if (activeTab === tab) {
-      if (mainRef.current) {
-        mainRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+  // Tab containers for instant, butter-smooth tab switching (zero layout reflow & zero scroll jumping)
+  const homeContainerRef = useRef<HTMLDivElement>(null);
+  const filesContainerRef = useRef<HTMLDivElement>(null);
+  const recentContainerRef = useRef<HTMLDivElement>(null);
+  const toolsContainerRef = useRef<HTMLDivElement>(null);
+
+  const activeTabRef = useRef<TabType>(activeTab);
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
+
+  const getActiveScrollContainer = useCallback((tab: TabType = activeTabRef.current) => {
+    switch (tab) {
+      case 'home': return homeContainerRef.current;
+      case 'files': return filesContainerRef.current;
+      case 'recent': return recentContainerRef.current;
+      case 'tools': return toolsContainerRef.current;
+      default: return null;
+    }
+  }, []);
+
+  const fileReturnScrollRef = useRef<{ tab: TabType; top: number } | null>(null);
+  const isOpeningDocRef = useRef(false);
+
+  const handleTabClick = useCallback((tab: TabType) => {
+    if (activeTabRef.current === tab) {
+      const container = getActiveScrollContainer(tab);
+      if (container) {
+        container.scrollTo({ top: 0, behavior: 'smooth' });
       }
     } else {
+      if (tab === 'recent' && recentContainerRef.current) {
+        recentContainerRef.current.scrollTop = 0;
+      }
       setActiveTab(tab);
     }
-  };
+  }, [getActiveScrollContainer]);
 
   // Back button handler
   const handleGoBack = () => {
@@ -243,11 +228,18 @@ export default function App() {
       setSelectedFile(null);
       return;
     }
+    if (activeTab === 'scan') {
+      setActiveTab('home');
+      return;
+    }
 
     const history = tabHistoryRef.current;
     if (history.length > 1) {
       history.pop();
       const prevTab = history[history.length - 1];
+      if (prevTab === 'recent' && recentContainerRef.current) {
+        recentContainerRef.current.scrollTop = 0;
+      }
       isNavigatingTabBackRef.current = true;
       setActiveTab(prevTab);
     } else {
@@ -277,11 +269,13 @@ export default function App() {
     };
   }, []);
 
+  const DEFAULT_WEBHOOK_URL = 'https://script.google.com/macros/s/AKfycbwKygSiBDpLOp_uwRu6Cq0nqLTU5hEbX5e7BlYMOBuZzILnmmepW-qBhFX8hOQSYfj-Hg/exec';
+
   const [feedbackWebhook, setFeedbackWebhook] = useState(() => {
-    return localStorage.getItem('VITE_FEEDBACK_WEBHOOK_URL') || ((import.meta as any).env?.VITE_FEEDBACK_WEBHOOK_URL as string) || '';
+    return localStorage.getItem('VITE_FEEDBACK_WEBHOOK_URL') || ((import.meta as any).env?.VITE_FEEDBACK_WEBHOOK_URL as string) || DEFAULT_WEBHOOK_URL;
   });
   const [ratingWebhook, setRatingWebhook] = useState(() => {
-    return localStorage.getItem('VITE_RATING_WEBHOOK_URL') || ((import.meta as any).env?.VITE_RATING_WEBHOOK_URL as string) || '';
+    return localStorage.getItem('VITE_RATING_WEBHOOK_URL') || ((import.meta as any).env?.VITE_RATING_WEBHOOK_URL as string) || DEFAULT_WEBHOOK_URL;
   });
   interface LocalFeedback {
     id: string;
@@ -319,10 +313,6 @@ export default function App() {
 
   const [isSubmittingFeedback, setIsSubmittingFeedback] = useState(false);
   const [isSubmittingRating, setIsSubmittingRating] = useState(false);
-  const [showFeedbackWebhookSetup, setShowFeedbackWebhookSetup] = useState(false);
-  const [showRatingWebhookSetup, setShowRatingWebhookSetup] = useState(false);
-  const [copiedFeedbackSetup, setCopiedFeedbackSetup] = useState(false);
-  const [copiedRatingSetup, setCopiedRatingSetup] = useState(false);
 
   const syncPendingItems = async (type: 'feedback' | 'rating' | 'all') => {
     // Sync feedback
@@ -408,82 +398,57 @@ export default function App() {
 
   const t = getTranslator(selectedLanguage);
 
-  const requirePremiumOrAd = (callback: () => void) => {
+  const requirePremiumOrAd = useCallback((callback: () => void) => {
     adService.showInterstitial(callback);
-  };
-
-  const handlePayment = (app: 'phonepe' | 'gpay' | 'upi') => {
-    const amount = selectedPlan === 'yearly' ? 49 : 7;
-    const upiId = 'akshaykale07057@oksbi';
-    const name = 'PDF Reader Pro';
-
-    let url = '';
-    const queryParams = `pa=${upiId}&pn=${encodeURIComponent(name)}&am=${amount}&cu=INR`;
-
-    if (app === 'phonepe') {
-      url = `phonepe://pay?${queryParams}`;
-    } else if (app === 'gpay') {
-      url = `tez://upi/pay?${queryParams}`;
-    } else {
-      url = `upi://pay?${queryParams}`;
-    }
-
-    if (Capacitor.isNativePlatform()) {
-      AppLauncher.openUrl({ url }).catch(err => {
-        console.warn('Failed to launch native payment app via AppLauncher, falling back to href navigation:', err);
-        try {
-          window.location.href = url;
-        } catch (e) {
-          console.error('Href navigation failed:', e);
-        }
-      });
-    } else {
-      try {
-        window.location.href = url;
-      } catch (e) {
-        console.log('Failed to open payment app', e);
-      }
-    }
-  };
+  }, []);
 
   const handleShare = async () => {
-    const textToShare = 'Check out this offline PDF & Document Reader app! ' + window.location.origin;
-    const w = window as any;
-    if (w.AndroidInterface && w.AndroidInterface.shareText) {
-      w.AndroidInterface.shareText(textToShare);
-      return;
+    const playStoreUrl = 'https://play.google.com/store/apps/details?id=com.pdforeader.app';
+    const textToShare = `Check out PDFO Reader & Converter! Download the app from Google Play Store: ${playStoreUrl}`;
+
+    if (Capacitor.isNativePlatform()) {
+      try {
+        await Share.share({
+          title: 'PDFO Reader & Converter',
+          text: 'Check out PDFO Reader & Converter — read, convert, compress, and scan documents offline!',
+          url: playStoreUrl,
+          dialogTitle: 'Share PDFO Reader & Converter',
+        });
+        return;
+      } catch (err) {
+        console.log('Error native sharing', err);
+      }
     }
 
     if (navigator.share) {
       try {
         await navigator.share({
-          title: 'PDF Reader Pro',
-          text: 'Check out this offline PDF & Document Reader app!',
-          url: window.location.origin,
+          title: 'PDFO Reader & Converter',
+          text: 'Check out PDFO Reader & Converter — read, convert, compress, and scan documents offline!',
+          url: playStoreUrl,
         });
         return;
       } catch (err) {
-        console.log('Error sharing', err);
+        console.log('Error web sharing', err);
       }
     }
 
     try {
       await navigator.clipboard.writeText(textToShare);
-      if (!navigator.userAgent.toLowerCase().includes('android')) {
-        alert('App link copied to your clipboard! Paste/share it directly in WhatsApp or messages to invite friends.');
-      } else {
-        alert('Text copied to clipboard!');
-      }
+      alert('Play Store link copied to your clipboard! Paste and share it with your friends.');
     } catch (e) {
-      alert('Share offline reader link: ' + window.location.origin);
+      alert(`Download PDFO Reader & Converter: ${playStoreUrl}`);
     }
   };
 
-  const loadFiles = async () => {
+  const loadFiles = useCallback(async () => {
     try {
       const storedFiles = await storageService.getFiles();
       setFiles(storedFiles);
-      setRecentFiles(storedFiles.slice(0, 5));
+      const recent = [...storedFiles]
+        .filter(f => f.lastOpenedAt && f.lastOpenedAt > 0)
+        .sort((a, b) => (b.lastOpenedAt || 0) - (a.lastOpenedAt || 0));
+      setRecentFiles(recent.length > 0 ? recent.slice(0, 10) : storedFiles.slice(0, 5));
 
       // Auto-sync handle is no longer needed as we persist Blobs directly
       /*
@@ -495,7 +460,7 @@ export default function App() {
     } catch (error) {
       console.error('Failed to load files', error);
     }
-  };
+  }, []);
 
   const handleSyncComplete = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files;
@@ -617,7 +582,7 @@ export default function App() {
     }
   };
 
-  const handleAutoScan = (isRetry = false) => {
+  const handleAutoScan = (isRetry = false, isInitial = false) => {
     if (isScanningRef.current) return;
     isScanningRef.current = true;
     setIsScanning(true);
@@ -628,16 +593,17 @@ export default function App() {
         if (Capacitor.isNativePlatform()) {
           const scanned = await scanDeviceForDocuments();
           if (scanned && scanned.length > 0) {
-            for (const file of scanned) {
-              await storageService.saveFile(file);
-            }
+            await storageService.saveFilesBatch(scanned);
           } else if (!isRetry) {
             // If 0 files found on first scan (potentially due to OS storage mounting delay on resume),
             // schedule a retry in 1.5 seconds to check again.
             setTimeout(() => {
-              handleAutoScan(true);
+              handleAutoScan(true, isInitial);
             }, 1500);
+            return;
           }
+          // Mark initial storage scan as completed
+          localStorage.setItem('initial_storage_scan_done', 'true');
         }
       } catch (error) {
         console.error('Error auto scanning files:', error);
@@ -652,9 +618,9 @@ export default function App() {
           } finally {
             setIsScanning(false);
             isScanningRef.current = false;
-            // Switch to files tab to show scanned files immediately
-            if (activeTab === 'home') {
-              setActiveTab('files');
+            // Ensure user stays on the Home page after scanning
+            if (isInitial) {
+              setActiveTab('home');
             }
           }
         }, remainingDelay);
@@ -664,11 +630,14 @@ export default function App() {
 
   const touchStartY = useRef(0);
   const isDragging = useRef(false);
+  const pullYRef = useRef(0);
+  const rafId = useRef<number | null>(null);
 
   const handleTouchStart = (e: React.TouchEvent) => {
-    if (!mainRef.current) return;
+    const container = getActiveScrollContainer();
+    if (!container) return;
     // Only track if we are at the top of the scroll container
-    if (mainRef.current.scrollTop === 0) {
+    if (container.scrollTop <= 0) {
       touchStartY.current = e.touches[0].clientY;
       isDragging.current = true;
     } else {
@@ -677,7 +646,16 @@ export default function App() {
   };
 
   const handleTouchMove = (e: React.TouchEvent) => {
-    if (!isDragging.current || !mainRef.current) return;
+    const container = getActiveScrollContainer();
+    if (!isDragging.current || !container) return;
+    if (container.scrollTop > 0) {
+      isDragging.current = false;
+      if (pullYRef.current !== 0) {
+        pullYRef.current = 0;
+        setPullY(0);
+      }
+      return;
+    }
     const currentY = e.touches[0].clientY;
     const deltaY = currentY - touchStartY.current;
 
@@ -685,7 +663,13 @@ export default function App() {
     if (deltaY > 0) {
       // Calculate pull resistance
       const pull = Math.min(deltaY * 0.4, 100);
-      setPullY(pull);
+      pullYRef.current = pull;
+      if (rafId.current === null) {
+        rafId.current = requestAnimationFrame(() => {
+          setPullY(pullYRef.current);
+          rafId.current = null;
+        });
+      }
 
       // Prevent browser default overscroll / bounce behavior while pulling down
       if (pull > 5 && e.cancelable) {
@@ -693,6 +677,7 @@ export default function App() {
       }
     } else {
       // If user drags up, clear pull state immediately
+      pullYRef.current = 0;
       setPullY(0);
       isDragging.current = false;
     }
@@ -700,10 +685,16 @@ export default function App() {
 
   const handleTouchEnd = () => {
     isDragging.current = false;
-    if (pullY > 80 && !isScanning) {
+    if (rafId.current !== null) {
+      cancelAnimationFrame(rafId.current);
+      rafId.current = null;
+    }
+    const finalPull = pullYRef.current;
+    pullYRef.current = 0;
+    setPullY(0);
+    if (finalPull > 80 && !isScanning) {
       handleAutoScan();
     }
-    setPullY(0);
   };
 
   const handlePickFolder = () => {
@@ -713,43 +704,28 @@ export default function App() {
   const filesTouchStartX = useRef<number | null>(null);
   const filesTouchStartY = useRef<number | null>(null);
   const filesSwipeTriggered = useRef<boolean>(false);
-  const scrollPositionRef = useRef<number>(0);
-  const windowScrollPositionRef = useRef<number>(0);
 
+  // File return scroll restoration effect (restores position after closing file preview or doc viewer)
   useEffect(() => {
-    if (!viewingDoc && !selectedFile && (scrollPositionRef.current > 0 || windowScrollPositionRef.current > 0)) {
-      const savedMain = scrollPositionRef.current;
-      const savedWin = windowScrollPositionRef.current;
-      
-      scrollPositionRef.current = 0; // Reset after reading so next click works correctly
-      windowScrollPositionRef.current = 0;
+    if (!viewingDoc && !selectedFile && !isOpeningDocRef.current && fileReturnScrollRef.current) {
+      const savedInfo = fileReturnScrollRef.current;
+      fileReturnScrollRef.current = null; // Clear so it only restores once
 
-      const restore = () => {
-        if (mainRef.current) {
-          mainRef.current.scrollTop = savedMain;
-        }
-        window.scrollTo(0, savedWin);
-        document.documentElement.scrollTop = savedWin;
-      };
-
-      // Restore scroll at multiple intervals to handle asynchronous DOM updates and layout reflows
-      const timer1 = setTimeout(restore, 30);
-      const timer2 = setTimeout(restore, 100);
-      const timer3 = setTimeout(restore, 250);
-      const timer4 = setTimeout(restore, 500);
-      const timer5 = setTimeout(restore, 800);
-
-      return () => {
-        clearTimeout(timer1);
-        clearTimeout(timer2);
-        clearTimeout(timer3);
-        clearTimeout(timer4);
-        clearTimeout(timer5);
-      };
+      const container = getActiveScrollContainer(savedInfo.tab);
+      if (container) {
+        container.scrollTop = savedInfo.top;
+      }
     }
   }, [viewingDoc, selectedFile]);
 
-  const handleFilesTouchStart = (e: React.TouchEvent) => {
+  const handleCategorySelect = useCallback((cat: string) => {
+    setActiveCategory(cat);
+    if (filesContainerRef.current) {
+      filesContainerRef.current.scrollTop = 0;
+    }
+  }, []);
+
+  const handleFilesTouchStart = useCallback((e: React.TouchEvent) => {
     if (e.target instanceof HTMLElement && e.target.closest('.overflow-x-auto')) {
       return;
     }
@@ -758,9 +734,9 @@ export default function App() {
       filesTouchStartY.current = e.touches[0].clientY;
       filesSwipeTriggered.current = false;
     }
-  };
+  }, []);
 
-  const handleFilesTouchMove = (e: React.TouchEvent) => {
+  const handleFilesTouchMove = useCallback((e: React.TouchEvent) => {
     if (filesTouchStartX.current === null || filesTouchStartY.current === null || filesSwipeTriggered.current) return;
 
     const currentX = e.touches[0].clientX;
@@ -769,8 +745,14 @@ export default function App() {
     const diffX = currentX - filesTouchStartX.current;
     const diffY = currentY - filesTouchStartY.current;
 
+    // If there is any significant vertical motion, lock out category swipe so scrolling documents is butter-smooth
+    if (Math.abs(diffY) > 20) {
+      filesSwipeTriggered.current = true;
+      return;
+    }
+
     // Check if it's primarily horizontal swipe and meets threshold
-    if (Math.abs(diffX) > Math.abs(diffY) && Math.abs(diffX) > 80) {
+    if (!filesSwipeTriggered.current && Math.abs(diffX) > 75 && Math.abs(diffY) <= 20) {
       filesSwipeTriggered.current = true; // Prevent double trigger
       const categoriesList = ['All', 'PDF', 'EXCEL', 'DOC', 'PPT', 'EPUB', 'IMAGES'];
       const idx = categoriesList.indexOf(activeCategory);
@@ -778,56 +760,38 @@ export default function App() {
       if (diffX > 0) {
         // Swiped right -> go to previous category
         if (idx > 0) {
-          setActiveCategory(categoriesList[idx - 1]);
+          handleCategorySelect(categoriesList[idx - 1]);
         }
       } else {
         // Swiped left -> go to next category
         if (idx < categoriesList.length - 1) {
-          setActiveCategory(categoriesList[idx + 1]);
+          handleCategorySelect(categoriesList[idx + 1]);
         }
       }
     }
-  };
+  }, [activeCategory, handleCategorySelect]);
 
-  const handleFilesTouchEnd = () => {
+  const handleFilesTouchEnd = useCallback(() => {
     filesTouchStartX.current = null;
     filesTouchStartY.current = null;
     filesSwipeTriggered.current = false;
-  };
+  }, []);
 
-  // Startup storage permission and auto-scan check
+  // Startup storage permission and first-time initial scan check
   useEffect(() => {
     let hasPrompted = false;
 
-    const scanIfGranted = async (retriesLeft = 4) => {
-      try {
-        if (Capacitor.isNativePlatform()) {
-          const { Filesystem } = await import('@capacitor/filesystem');
-          const permission = await Filesystem.checkPermissions();
-          if (permission.publicStorage === 'granted') {
-            const { AllFilesAccess } = await import('./folderscan/FileScanner');
-            const { granted } = await AllFilesAccess.checkPermission();
-            if (granted) {
-              handleAutoScanRef.current();
-              return;
-            }
-          }
-          
-          if (retriesLeft > 0) {
-            console.log(`Permissions not yet fully granted. Retrying scanIfGranted in 500ms... (${retriesLeft} retries left)`);
-            setTimeout(() => {
-              scanIfGranted(retriesLeft - 1);
-            }, 500);
-          }
-        }
-      } catch (e) {
-        console.warn("Scan if granted check failed", e);
+    const checkStartupScan = async () => {
+      // If initial scan was already done previously, do NOT show scanning storage on app reopen
+      const hasInitialScanned = localStorage.getItem('initial_storage_scan_done') === 'true';
+      if (hasInitialScanned) {
+        loadFiles();
+        return;
       }
-    };
 
-    const promptPermissionsOnStartup = async () => {
       if (hasPrompted) return;
       hasPrompted = true;
+
       try {
         if (Capacitor.isNativePlatform()) {
           const { Filesystem } = await import('@capacitor/filesystem');
@@ -835,22 +799,10 @@ export default function App() {
           if (permission.publicStorage !== 'granted') {
             const request = await Filesystem.requestPermissions();
             if (request.publicStorage === 'granted') {
-              const { AllFilesAccess } = await import('./folderscan/FileScanner');
-              const { granted } = await AllFilesAccess.checkPermission();
-              if (!granted) {
-                await AllFilesAccess.requestPermission();
-              } else {
-                handleAutoScanRef.current();
-              }
+              handleAutoScanRef.current(false, true);
             }
           } else {
-            const { AllFilesAccess } = await import('./folderscan/FileScanner');
-            const { granted } = await AllFilesAccess.checkPermission();
-            if (!granted) {
-              await AllFilesAccess.requestPermission();
-            } else {
-              handleAutoScanRef.current();
-            }
+            handleAutoScanRef.current(false, true);
           }
         }
       } catch (e) {
@@ -858,8 +810,9 @@ export default function App() {
       }
     };
 
+    // When app resumes or gets focus, just refresh files from local database without showing scanning storage modal
     const handleResume = () => {
-      scanIfGranted();
+      loadFiles();
     };
 
     // Use Capacitor App plugin for reliable resume events
@@ -877,8 +830,8 @@ export default function App() {
     
     // Slight delay on mount to ensure app is fully initialized first
     const timer = setTimeout(() => {
-      promptPermissionsOnStartup();
-    }, 300);
+      checkStartupScan();
+    }, 400);
 
     return () => {
       stateListenerPromise.then(handle => handle.remove());
@@ -888,102 +841,89 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // Hide native OS splash immediately so the app shows only the unified custom animated splash
+    SplashScreen.hide().catch(() => {});
+
     const initApp = async () => {
+      // Quick fast startup: show the 3-dot animated splash briefly (~350ms) while loading documents, then quickly show interface
+      const minDisplayDuration = new Promise(resolve => setTimeout(resolve, 350));
       try {
-        const storedFiles = await storageService.getFiles();
-        setFiles(storedFiles);
-        setRecentFiles(storedFiles.slice(0, 5));
+        await Promise.all([loadFiles(), minDisplayDuration]);
       } catch (error) {
         console.error('Failed to init app', error);
       } finally {
+        // Smoothly reveal main interface
+        setShowAppSplash(false);
+
         // Initialize AdMob and show bottom banner ad
-        await adService.initialize();
-        await adService.showBanner();
+        try {
+          await adService.initialize();
+          await adService.showBanner();
+        } catch (adErr) {
+          console.warn('Ad initialization error', adErr);
+        }
       }
     };
     initApp();
   }, []);
 
-  const handleRenameFile = async (id: string, newName: string) => {
+  const handleRenameFile = useCallback(async (id: string, newName: string) => {
     await storageService.renameFile(id, newName);
-    const updatedFiles = await storageService.getFiles();
-    setFiles(updatedFiles);
-    setRecentFiles(updatedFiles.slice(0, 5));
-  };
+    await loadFiles();
+  }, [loadFiles]);
 
-  const handleDeleteFile = async (id: string) => {
+  const handleDeleteFile = useCallback(async (id: string) => {
     await storageService.deleteFile(id);
-    const updatedFiles = await storageService.getFiles();
-    setFiles(updatedFiles);
-    setRecentFiles(updatedFiles.slice(0, 5));
-  };
+    await loadFiles();
+  }, [loadFiles]);
 
-  const handleDownloadFile = async (file: DocFile) => {
-    try {
-      const blob = await storageService.getFileData(file.id);
-      if (!blob) {
-        console.error("Could not load file data for download");
-        return;
-      }
+  const handleDownloadFile = useCallback(async (file: DocFile) => {
+    await downloadDocumentFile(file);
+  }, []);
 
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = file.name;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      console.error("Failed to download file:", err);
-    }
-  };
-
-  const handleShareFile = async (file: DocFile) => {
+  const handleShareFile = useCallback(async (file: DocFile) => {
     try {
       await directShareFile(file);
     } catch (err: any) {
       console.error("Failed to share file natively:", err);
       alert(err.message || "Native share failed.");
     }
-  };
+  }, []);
 
-  const handleShareMultipleFiles = async (filesToShare: DocFile[]) => {
+  const handleShareMultipleFiles = useCallback(async (filesToShare: DocFile[]) => {
     try {
       await directShareMultipleFiles(filesToShare);
     } catch (err: any) {
       console.error("Failed to share files natively:", err);
       alert(err.message || "Native share failed.");
     }
-  };
+  }, []);
 
-  const handleScanComplete = async (newFile: DocFile) => {
-    // If newFile comes from ScanView, it should already be saved or we save it here
-    // But for consistency let's ensure it's in storage
-    const storedFiles = await storageService.getFiles();
-    setFiles(storedFiles);
-    setRecentFiles(storedFiles.slice(0, 5));
-    setActiveTab('home');
-  };
-
-  const handleFileClick = async (file: DocFile) => {
-    if (mainRef.current) {
-      scrollPositionRef.current = mainRef.current.scrollTop;
-    }
-    windowScrollPositionRef.current = window.pageYOffset || document.documentElement.scrollTop;
-    setSelectedFile(file);
-    // Mark as opened in local database to show on top of all lists immediately
-    const updatedFile = { ...file, lastOpenedAt: Date.now() };
-    await storageService.saveFile(updatedFile);
+  const handleScanComplete = useCallback(async (newFile: DocFile) => {
     await loadFiles();
-  };
+    if (homeContainerRef.current) {
+      homeContainerRef.current.scrollTop = 0;
+    }
+    setActiveTab('home');
+  }, [loadFiles]);
 
-  const openDoc = async (file: DocFile) => {
+  const handleFileClick = useCallback((file: DocFile) => {
+    const currentTab = activeTabRef.current;
+    const container = getActiveScrollContainer(currentTab);
+    const currentScroll = container ? container.scrollTop : 0;
+    fileReturnScrollRef.current = { tab: currentTab, top: currentScroll };
+    setSelectedFile(file);
+  }, [getActiveScrollContainer]);
+
+  const openDoc = (file: DocFile) => {
+    isOpeningDocRef.current = true;
     setSelectedFile(null);
     // Show interstitial ad before opening/viewing document
     adService.showInterstitial(async () => {
       setViewingDoc(file);
-      await storageService.saveFile({ ...file, lastOpenedAt: Date.now() });
+      isOpeningDocRef.current = false;
+      const updatedFile = { ...file, lastOpenedAt: Date.now() };
+      await storageService.saveFile(updatedFile);
       await loadFiles();
     });
   };
@@ -1015,262 +955,82 @@ export default function App() {
     return files.length > 0 ? files : recentFiles;
   };
 
-  const renderHome = () => (
-    <div className="space-y-8 pb-32 pt-10">
-      <header className="flex justify-between items-center px-6">
-        <div>
-          <h1 className="text-3xl font-display font-bold text-neutral-900 tracking-tight">{t('pdfReader')}</h1>
-        </div>
-        <div className="flex gap-2">
-          <button
-            onClick={() => setShowSettings(true)}
-            className="w-12 h-12 rounded-full bg-white border border-neutral-200/60 shadow-sm flex items-center justify-center text-neutral-600 hover:bg-neutral-50 transition-colors"
-          >
-            <Settings size={22} />
-          </button>
-        </div>
-      </header>
-
-      <div className="px-6 relative z-50">
-        <div className="relative group">
-          <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-neutral-400 group-focus-within:text-red-500 transition-colors" size={20} />
-          <input
-            type="text"
-            placeholder={t('searchPlaceholder')}
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full bg-white border border-neutral-200/60 shadow-sm rounded-full py-4 pl-14 pr-6 text-sm font-medium focus:ring-4 focus:ring-red-500/10 focus:border-red-500 outline-none transition-all"
-          />
-          {searchQuery && (
-            <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-neutral-200 shadow-xl rounded-2xl max-h-60 overflow-y-auto w-full z-50">
-              {files.filter(f => f.name.toLowerCase().includes(searchQuery.toLowerCase())).length > 0 ? (
-                files.filter(f => f.name.toLowerCase().includes(searchQuery.toLowerCase())).map(file => (
-                  <button
-                    key={file.id}
-                    onClick={() => {
-                      handleFileClick(file);
-                      setSearchQuery('');
-                    }}
-                    className="w-full text-left px-4 py-3 hover:bg-neutral-50 transition-colors border-b border-neutral-100 last:border-0 flex items-center gap-3"
-                  >
-                    <div className="w-10 h-10 bg-neutral-100 rounded-xl flex items-center justify-center shrink-0">
-                      <Files size={18} className="text-neutral-500" />
-                    </div>
-                    <div className="min-w-0">
-                      <p className="font-semibold text-neutral-900 truncate text-sm">{file.name}</p>
-                      <p className="text-xs text-neutral-500 truncate">{formatFileSize(file.size)}</p>
-                    </div>
-                  </button>
-                ))
-              ) : (
-                <div className="p-4 text-center text-sm font-medium text-neutral-500">
-                  {t('noMatches')} "{searchQuery}"
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="grid grid-cols-4 gap-4 px-6">
-        <button
-          onClick={() => setShowQRScanner(true)}
-          className="flex flex-col items-center gap-3 group"
-        >
-          <div className="w-16 h-16 bg-white border border-neutral-200/60 rounded-[24px] flex items-center justify-center text-red-500 shadow-sm group-hover:scale-105 group-hover:shadow-md group-hover:border-red-200 transition-all duration-300">
-            <QrCode size={28} strokeWidth={1.5} />
-          </div>
-          <span className="text-[11px] font-bold text-neutral-600 tracking-tight uppercase whitespace-nowrap">{t('qrScanner')}</span>
-        </button>
-
-        <button
-          onClick={() => requirePremiumOrAd(() => setShowCompressor(true))}
-          className="flex flex-col items-center gap-3 group"
-        >
-          <div className="w-16 h-16 bg-white border border-neutral-200/60 rounded-[24px] flex items-center justify-center text-neutral-900 shadow-sm group-hover:scale-105 group-hover:shadow-md group-hover:border-neutral-300 transition-all duration-300">
-            <Minimize2 size={28} strokeWidth={1.5} />
-          </div>
-          <span className="text-[11px] font-bold text-neutral-600 tracking-wide uppercase">{t('compress')}</span>
-        </button>
-
-        <button
-          onClick={() => requirePremiumOrAd(() => setShowMerge(true))}
-          className="flex flex-col items-center gap-3 group"
-        >
-          <div className="w-16 h-16 bg-white border border-neutral-200/60 rounded-[24px] flex items-center justify-center text-indigo-600 shadow-sm group-hover:scale-105 group-hover:shadow-md group-hover:border-indigo-200 transition-all duration-300">
-            <Merge size={28} strokeWidth={1.5} />
-          </div>
-          <span className="text-[11px] font-bold text-neutral-600 tracking-wide uppercase">{t('merge')}</span>
-        </button>
-
-        <button
-          onClick={() => requirePremiumOrAd(() => setShowSplit(true))}
-          className="flex flex-col items-center gap-3 group"
-        >
-          <div className="w-16 h-16 bg-white border border-neutral-200/60 rounded-[24px] flex items-center justify-center text-orange-500 shadow-sm group-hover:scale-105 group-hover:shadow-md group-hover:border-orange-200 transition-all duration-300">
-            <Scissors size={28} strokeWidth={1.5} />
-          </div>
-          <span className="text-[11px] font-bold text-neutral-600 tracking-wide uppercase">{t('split')}</span>
-        </button>
-      </div>
-
-      {!isPro && (
-        <div className="mx-6 mb-8 mt-4 relative">
-          <div className="absolute -inset-1 bg-gradient-to-r from-amber-400 to-amber-600 rounded-[28px] blur opacity-20"></div>
-          <div className="w-full bg-gradient-to-br from-amber-50 via-white to-amber-50/50 rounded-[24px] border border-amber-200/50 p-5 flex flex-col relative overflow-hidden shadow-sm transition-all duration-300">
-            <div className="absolute top-0 right-0 w-32 h-32 bg-amber-400/10 rounded-full blur-3xl -mr-10 -mt-10"></div>
-
-            <button
-              onClick={() => setIsPromoExpanded(!isPromoExpanded)}
-              className="flex items-center justify-between w-full text-left z-10"
-            >
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 bg-gradient-to-br from-amber-400 to-amber-500 rounded-xl flex items-center justify-center text-white shadow-lg shadow-amber-500/30">
-                  <Crown size={20} strokeWidth={2.5} />
-                </div>
-                <div>
-                  <h3 className="font-display font-bold text-lg text-neutral-900 leading-tight">PDF Reader Pro</h3>
-                  <p className="text-xs font-semibold text-amber-600 uppercase tracking-wider">{isPromoExpanded ? 'Premium Plan' : 'Remove Ads & Unlock Tools'}</p>
-                </div>
-              </div>
-              <div className="w-8 h-8 rounded-full bg-amber-100/50 flex items-center justify-center text-amber-600">
-                {isPromoExpanded ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
-              </div>
-            </button>
-
-            <AnimatePresence>
-              {isPromoExpanded && (
-                <motion.div
-                  initial={{ height: 0, opacity: 0 }}
-                  animate={{ height: 'auto', opacity: 1 }}
-                  exit={{ height: 0, opacity: 0 }}
-                  className="overflow-hidden"
-                >
-                  <div className="pt-6 pb-2 space-y-2 z-10 relative">
-                    <div className="flex items-center gap-2 text-sm text-neutral-700">
-                      <div className="w-5 h-5 rounded-full bg-amber-100 text-amber-600 flex items-center justify-center shrink-0">
-                        <Check size={12} strokeWidth={3} />
-                      </div>
-                      <span className="font-medium">{t('adFreeExperience')}</span>
-                    </div>
-                    <div className="flex items-center gap-2 text-sm text-neutral-700">
-                      <div className="w-5 h-5 rounded-full bg-amber-100 text-amber-600 flex items-center justify-center shrink-0">
-                        <Check size={12} strokeWidth={3} />
-                      </div>
-                      <span className="font-medium">{t('unlimitedPdfCompression')}</span>
-                    </div>
-                    <div className="flex items-center gap-2 text-sm text-neutral-700">
-                      <div className="w-5 h-5 rounded-full bg-amber-100 text-amber-600 flex items-center justify-center shrink-0">
-                        <Check size={12} strokeWidth={3} />
-                      </div>
-                      <span className="font-medium">{t('accessAllPremiumTools')}</span>
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={() => { setActiveSettingsModal('pro'); setShowSettings(true); }}
-                    className="w-full mt-4 py-3.5 bg-gradient-to-r from-amber-400 to-amber-500 text-white rounded-xl font-bold hover:from-amber-500 hover:to-amber-600 transition-colors shadow-lg shadow-amber-500/30 active:scale-95 z-10 relative"
-                  >
-                    {t('upgradeForTenRs')}
-                  </button>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-        </div>
-      )}
-
-      <FileList
-        title={files.length > 0 ? "Your Documents" : "Recent Documents"}
-        files={files.length > 0 ? files : recentFiles}
-        onFileClick={handleFileClick}
-        onRenameFile={handleRenameFile}
-        onDeleteFile={handleDeleteFile}
-        onShareFile={handleShareFile}
-        onShareFiles={handleShareMultipleFiles}
-        onDownloadFile={handleDownloadFile}
-        language={selectedLanguage}
-        onRefresh={handleAutoScan}
-      />
-    </div>
-  );
-
-  const renderFiles = () => {
-    const filteredFiles = files.filter(file => {
-      if (activeCategory === 'All') return true;
-      const mapping: Record<string, string> = {
-        'PDF': 'pdf',
-        'EXCEL': 'xlsx',
-        'DOC': 'doc',
-        'PPT': 'ppt',
-        'EPUB': 'epub',
-        'IMAGES': 'image'
-      };
-      return file.type === mapping[activeCategory];
+  const handleOpenSettings = useCallback(() => setShowSettings(true), []);
+  const handleOpenQRScanner = useCallback(() => setShowQRScanner(true), []);
+  const handleOpenCompressor = useCallback(() => requirePremiumOrAd(() => setShowCompressor(true)), [requirePremiumOrAd]);
+  const handleOpenMerge = useCallback(() => requirePremiumOrAd(() => setShowMerge(true)), [requirePremiumOrAd]);
+  const handleOpenSplit = useCallback(() => requirePremiumOrAd(() => setShowSplit(true)), [requirePremiumOrAd]);
+  const handleToolActionSelect = useCallback((action: string) => {
+    requirePremiumOrAd(() => {
+      if (action === 'merge-pdf') setShowMerge(true);
+      else if (action === 'split-pdf') setShowSplit(true);
+      else setActiveToolAction(action);
     });
+  }, [requirePremiumOrAd]);
+  const handleRefresh = useCallback(() => {
+    handleAutoScan();
+  }, []);
+  const handleSearchChange = useCallback((query: string) => {
+    setSearchQuery(query);
+  }, []);
 
-    return (
-      <div 
-        className="space-y-6 pb-32 pt-10"
-        onTouchStart={handleFilesTouchStart}
-        onTouchMove={handleFilesTouchMove}
-        onTouchEnd={handleFilesTouchEnd}
-      >
-        <div className="flex justify-between items-center px-6">
-          <h2 className="text-3xl font-display font-bold tracking-tight">{t('allFiles')}</h2>
-        </div>
-        <div className="flex gap-2 overflow-x-auto pb-2 px-6 no-scrollbar">
-          {['All', 'PDF', 'EXCEL', 'DOC', 'PPT', 'EPUB', 'IMAGES'].map(cat => (
-            <button
-              key={cat}
-              onClick={() => setActiveCategory(cat)}
-              className={cn(
-                "px-6 py-2.5 rounded-full text-sm font-semibold whitespace-nowrap transition-all duration-300",
-                activeCategory === cat
-                  ? "bg-neutral-900 text-white shadow-md"
-                  : "bg-white border border-neutral-200/60 text-neutral-600 hover:bg-neutral-50 hover:border-neutral-300"
-              )}
-            >
-              {cat}
-            </button>
-          ))}
-        </div>
-        <FileList
-          files={filteredFiles}
-          onFileClick={handleFileClick}
-          onRenameFile={handleRenameFile}
-          onDeleteFile={handleDeleteFile}
-          onShareFile={handleShareFile}
-          onShareFiles={handleShareMultipleFiles}
-          onDownloadFile={handleDownloadFile}
-          language={selectedLanguage}
-          onRefresh={handleAutoScan}
-        />
-      </div>
-    );
-  };
-
-  const renderRecent = () => (
-    <div className="space-y-6 pb-32 pt-10">
-      <h2 className="text-3xl font-display font-bold px-6 tracking-tight">{t('recentlyOpened')}</h2>
-      <FileList
-        files={recentFiles}
-        onFileClick={handleFileClick}
-        onRenameFile={handleRenameFile}
-        onDeleteFile={handleDeleteFile}
-        onShareFile={handleShareFile}
-        onShareFiles={handleShareMultipleFiles}
-        onDownloadFile={handleDownloadFile}
-        language={selectedLanguage}
-        onRefresh={handleAutoScan}
-      />
-    </div>
-  );
+  const filteredFiles = useMemo(() => {
+    if (activeCategory === 'All') return files;
+    const mapping: Record<string, string> = {
+      'PDF': 'pdf',
+      'EXCEL': 'xlsx',
+      'DOC': 'doc',
+      'PPT': 'ppt',
+      'EPUB': 'epub',
+      'IMAGES': 'image'
+    };
+    return files.filter(file => file.type === mapping[activeCategory]);
+  }, [files, activeCategory]);
 
 
 
   return (
     <div className="min-h-screen bg-[#FAFAFA] font-sans text-neutral-900 max-w-md mx-auto shadow-2xl relative overflow-hidden">
+      {/* App Opening Startup Splash Screen */}
+      <AnimatePresence>
+        {showAppSplash && (
+          <motion.div
+            key="startup-splash-screen"
+            initial={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2, ease: 'easeOut' }}
+            className="fixed inset-0 z-[100] bg-white flex flex-col items-center justify-center p-6 select-none"
+          >
+            {/* Center Content: Logo + App Name */}
+            <div className="flex flex-col items-center justify-center text-center">
+              <div className="relative">
+                <img
+                  src="./app_logo.png"
+                  alt="PDFO Reader & Converter"
+                  className="w-28 h-28 object-contain"
+                />
+              </div>
+
+              <div className="mt-6 flex flex-col items-center text-center">
+                <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-neutral-900 font-display">
+                  <span className="text-red-600">PDFO</span>{' '}
+                  <span className="text-neutral-900">Reader &amp; Converter</span>
+                </h1>
+                <p className="text-xs sm:text-sm font-medium text-neutral-400 mt-2 tracking-wide">
+                  All-in-One Document Reader &amp; Tools
+                </p>
+                {/* Three Dots Loading Animation */}
+                <div className="splash-dots mt-6">
+                  <span className="splash-dot" />
+                  <span className="splash-dot" />
+                  <span className="splash-dot" />
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <AnimatePresence>
         {(pullY > 20 || isSyncing) && (
           <motion.div
@@ -1291,10 +1051,7 @@ export default function App() {
 
       <main
         ref={mainRef}
-        className="h-screen overflow-y-auto no-scrollbar relative"
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
+        className="h-screen w-full relative overflow-hidden"
       >
         <input
           id="device-scanner"
@@ -1304,20 +1061,124 @@ export default function App() {
           accept=".pdf,application/pdf,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.doc,application/msword,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xls,application/vnd.ms-excel,.pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation,.ppt,application/vnd.ms-powerpoint,.epub,application/epub+zip,image/*"
           onChange={handleSyncComplete}
         />
-        <div>
-          {activeTab === 'home' && renderHome()}
-          {activeTab === 'files' && renderFiles()}
-          {activeTab === 'recent' && renderRecent()}
-          {activeTab === 'tools' && <ToolsView language={selectedLanguage} onSelectAction={(action) => {
-            requirePremiumOrAd(() => {
-              if (action === 'merge-pdf') setShowMerge(true);
-              else if (action === 'split-pdf') setShowSplit(true);
-              else setActiveToolAction(action);
-            });
-          }} />}
-          {activeTab === 'scan' && <ScanView onComplete={handleScanComplete} onCancel={() => setActiveTab('home')} requirePremiumOrAd={requirePremiumOrAd} adBannerHeight={adBannerHeight} />}
+        
+        {/* Home Tab Panel */}
+        <div
+          ref={homeContainerRef}
+          className={cn(
+            "absolute inset-0 h-full w-full overflow-y-auto no-scrollbar",
+            activeTab === 'home'
+              ? "z-10 visible pointer-events-auto"
+              : "-z-10 invisible pointer-events-none"
+          )}
+          style={{ WebkitOverflowScrolling: 'touch', transform: 'translateZ(0)' }}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+        >
+          <HomeTab
+            files={files}
+            recentFiles={recentFiles}
+            searchQuery={searchQuery}
+            onSearchChange={handleSearchChange}
+            onOpenSettings={handleOpenSettings}
+            onOpenQRScanner={handleOpenQRScanner}
+            onOpenCompressor={handleOpenCompressor}
+            onOpenMerge={handleOpenMerge}
+            onOpenSplit={handleOpenSplit}
+            onFileClick={handleFileClick}
+            onRenameFile={handleRenameFile}
+            onDeleteFile={handleDeleteFile}
+            onShareFile={handleShareFile}
+            onShareFiles={handleShareMultipleFiles}
+            onDownloadFile={handleDownloadFile}
+            language={selectedLanguage}
+            onRefresh={handleRefresh}
+          />
+        </div>
+
+        {/* Files Tab Panel */}
+        <div
+          ref={filesContainerRef}
+          className={cn(
+            "absolute inset-0 h-full w-full overflow-y-auto no-scrollbar",
+            activeTab === 'files'
+              ? "z-10 visible pointer-events-auto"
+              : "-z-10 invisible pointer-events-none"
+          )}
+          style={{ WebkitOverflowScrolling: 'touch', transform: 'translateZ(0)' }}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+        >
+          <FilesTab
+            files={filteredFiles}
+            activeCategory={activeCategory}
+            onSelectCategory={handleCategorySelect}
+            onFileClick={handleFileClick}
+            onRenameFile={handleRenameFile}
+            onDeleteFile={handleDeleteFile}
+            onShareFile={handleShareFile}
+            onShareFiles={handleShareMultipleFiles}
+            onDownloadFile={handleDownloadFile}
+            language={selectedLanguage}
+            onRefresh={handleRefresh}
+            onTouchStart={handleFilesTouchStart}
+            onTouchMove={handleFilesTouchMove}
+            onTouchEnd={handleFilesTouchEnd}
+          />
+        </div>
+
+        {/* Recent Tab Panel */}
+        <div
+          ref={recentContainerRef}
+          className={cn(
+            "absolute inset-0 h-full w-full overflow-y-auto no-scrollbar",
+            activeTab === 'recent'
+              ? "z-10 visible pointer-events-auto"
+              : "-z-10 invisible pointer-events-none"
+          )}
+          style={{ WebkitOverflowScrolling: 'touch', transform: 'translateZ(0)' }}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+        >
+          <RecentTab
+            files={recentFiles}
+            onFileClick={handleFileClick}
+            onRenameFile={handleRenameFile}
+            onDeleteFile={handleDeleteFile}
+            onShareFile={handleShareFile}
+            onShareFiles={handleShareMultipleFiles}
+            onDownloadFile={handleDownloadFile}
+            language={selectedLanguage}
+            onRefresh={handleRefresh}
+          />
+        </div>
+
+        {/* Tools Tab Panel */}
+        <div
+          ref={toolsContainerRef}
+          className={cn(
+            "absolute inset-0 h-full w-full overflow-y-auto no-scrollbar",
+            activeTab === 'tools'
+              ? "z-10 visible pointer-events-auto"
+              : "-z-10 invisible pointer-events-none"
+          )}
+          style={{ WebkitOverflowScrolling: 'touch', transform: 'translateZ(0)' }}
+        >
+          <ToolsView language={selectedLanguage} onSelectAction={handleToolActionSelect} />
         </div>
       </main>
+
+      {/* Scan View / Camera Fullscreen (hidden navigation, clean full viewport) */}
+      {activeTab === 'scan' && (
+        <Suspense fallback={<ViewSuspenseFallback />}>
+          <div className="fixed inset-0 z-50">
+            <ScanView onComplete={handleScanComplete} onCancel={() => setActiveTab('home')} requirePremiumOrAd={requirePremiumOrAd} adBannerHeight={adBannerHeight} />
+          </div>
+        </Suspense>
+      )}
 
       {isScanning && (
         <div className="fixed inset-0 z-[60] bg-white/75 backdrop-blur-md flex flex-col items-center justify-center p-8 text-center">
@@ -1329,26 +1190,28 @@ export default function App() {
         </div>
       )}
 
-      {/* Bottom Navigation (shifted dynamically when AdMob banner is active) */}
-      <div 
-        className="fixed left-1/2 -translate-x-1/2 w-[calc(100%-3rem)] max-w-[380px] z-40 transition-all duration-300 ease-out"
-        style={{ bottom: adBannerHeight > 0 ? `${adBannerHeight + 16}px` : '1.5rem' }}
-      >
-        <nav className="bg-white/90 backdrop-blur-xl border border-neutral-200/60 rounded-[32px] px-6 py-4 flex justify-between items-center shadow-2xl shadow-neutral-200/50">
-          <NavButton active={activeTab === 'home'} onClick={() => handleTabClick('home')} icon={<Home size={24} strokeWidth={activeTab === 'home' ? 2.5 : 2} />} label={t('home')} />
-          <NavButton active={activeTab === 'files'} onClick={() => handleTabClick('files')} icon={<Files size={24} strokeWidth={activeTab === 'files' ? 2.5 : 2} />} label={t('files')} />
+      {/* Bottom Navigation (shifted dynamically when AdMob banner is active) - Hidden when in camera/scan view */}
+      {activeTab !== 'scan' && (
+        <div 
+          className="fixed left-1/2 -translate-x-1/2 w-[calc(100%-3rem)] max-w-[380px] z-40 transition-all duration-300 ease-out"
+          style={{ bottom: adBannerHeight > 0 ? `${adBannerHeight + 16}px` : '1.5rem' }}
+        >
+          <nav className="bg-white/90 backdrop-blur-xl border border-neutral-200/60 rounded-[32px] px-6 py-4 flex justify-between items-center shadow-2xl shadow-neutral-200/50">
+            <NavButton tab="home" active={activeTab === 'home'} onSelect={handleTabClick} icon={<Home size={24} strokeWidth={activeTab === 'home' ? 2.5 : 2} />} label={t('home')} />
+            <NavButton tab="files" active={activeTab === 'files'} onSelect={handleTabClick} icon={<Files size={24} strokeWidth={activeTab === 'files' ? 2.5 : 2} />} label={t('files')} />
 
-          <button
-            onClick={() => handleTabClick('scan')}
-            className="w-16 h-16 bg-red-500 rounded-full flex items-center justify-center text-white shadow-lg shadow-red-500/30 -mt-10 border-[6px] border-[#FAFAFA] active:scale-95 transition-all hover:bg-red-600"
-          >
-            <Camera size={26} strokeWidth={2.5} />
-          </button>
+            <button
+              onClick={() => handleTabClick('scan')}
+              className="w-16 h-16 bg-red-500 rounded-full flex items-center justify-center text-white shadow-lg shadow-red-500/30 -mt-10 border-[6px] border-[#FAFAFA] active:scale-90 transition-all hover:bg-red-600"
+            >
+              <Camera size={26} strokeWidth={2.5} />
+            </button>
 
-          <NavButton active={activeTab === 'recent'} onClick={() => handleTabClick('recent')} icon={<Clock size={24} strokeWidth={activeTab === 'recent' ? 2.5 : 2} />} label={t('recent')} />
-          <NavButton active={activeTab === 'tools'} onClick={() => handleTabClick('tools')} icon={<Wrench size={24} strokeWidth={activeTab === 'tools' ? 2.5 : 2} />} label={t('tools')} />
-        </nav>
-      </div>
+            <NavButton tab="recent" active={activeTab === 'recent'} onSelect={handleTabClick} icon={<Clock size={24} strokeWidth={activeTab === 'recent' ? 2.5 : 2} />} label={t('recent')} />
+            <NavButton tab="tools" active={activeTab === 'tools'} onSelect={handleTabClick} icon={<Wrench size={24} strokeWidth={activeTab === 'tools' ? 2.5 : 2} />} label={t('tools')} />
+          </nav>
+        </div>
+      )}
 
       {/* File Viewer Modal */}
       <AnimatePresence>
@@ -1405,127 +1268,135 @@ export default function App() {
       {/* Document Viewer */}
       <AnimatePresence>
         {viewingDoc && (
-          <DocumentViewerModal
-            file={viewingDoc}
-            onClose={() => { setViewingDoc(null); loadFiles(); }}
-            language={selectedLanguage}
-            files={getCurrentFilesList()}
-            onFileChange={handleViewingDocChange}
-          />
+          <Suspense fallback={<ViewSuspenseFallback />}>
+            <DocumentViewerModal
+              file={viewingDoc}
+              onClose={() => { setViewingDoc(null); }}
+              language={selectedLanguage}
+              files={getCurrentFilesList()}
+              onFileChange={handleViewingDocChange}
+            />
+          </Suspense>
         )}
       </AnimatePresence>
-
-
-
-
 
       {/* QR Scanner Modal */}
       <AnimatePresence>
         {showQRScanner && (
-          <motion.div
-            initial={{ y: '100%' }}
-            animate={{ y: 0 }}
-            exit={{ y: '100%' }}
-            transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-            className="fixed inset-0 bg-[#FAFAFA] z-50 flex flex-col"
-          >
-            <div className="p-4 flex justify-between items-center border-b border-neutral-200/60 bg-white shadow-sm">
-              <button onClick={() => setShowQRScanner(false)} className="p-2 hover:bg-neutral-100 rounded-full transition-colors">
-                <X size={24} />
-              </button>
-              <h3 className="font-display font-bold">{t('qrScanner')}</h3>
-              <div className="w-10" />
-            </div>
-            <div className="flex-1 overflow-y-auto no-scrollbar bg-[#FAFAFA]">
-              <QRScannerView onClose={() => setShowQRScanner(false)} language={selectedLanguage} />
-            </div>
-          </motion.div>
+          <Suspense fallback={<ViewSuspenseFallback />}>
+            <motion.div
+              initial={{ y: '100%' }}
+              animate={{ y: 0 }}
+              exit={{ y: '100%' }}
+              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+              className="fixed inset-0 bg-[#FAFAFA] z-50 flex flex-col"
+            >
+              <div className="p-4 flex justify-between items-center border-b border-neutral-200/60 bg-white shadow-sm">
+                <button onClick={() => setShowQRScanner(false)} className="p-2 hover:bg-neutral-100 rounded-full transition-colors">
+                  <X size={24} />
+                </button>
+                <h3 className="font-display font-bold">{t('qrScanner')}</h3>
+                <div className="w-10" />
+              </div>
+              <div className="flex-1 overflow-y-auto no-scrollbar bg-[#FAFAFA]">
+                <QRScannerView onClose={() => setShowQRScanner(false)} language={selectedLanguage} />
+              </div>
+            </motion.div>
+          </Suspense>
         )}
       </AnimatePresence>
 
       {/* Size Converter Modal */}
       <AnimatePresence>
         {showCompressor && (
-          <motion.div
-            initial={{ y: '100%' }}
-            animate={{ y: 0 }}
-            exit={{ y: '100%' }}
-            transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-            className="fixed inset-0 bg-[#FAFAFA] z-50 flex flex-col"
-          >
-            <div className="p-4 flex justify-between items-center border-b border-neutral-200/60 bg-white shadow-sm">
-              <button onClick={() => { setShowCompressor(false); loadFiles(); }} className="p-2 hover:bg-neutral-100 rounded-full transition-colors">
-                <X size={24} />
-              </button>
-              <h3 className="font-display font-bold">{t('sizeConverter')}</h3>
-              <div className="w-10" />
-            </div>
-            <div className="flex-1 overflow-y-auto no-scrollbar">
-              <CompressorView language={selectedLanguage} onComplete={() => { setShowCompressor(false); setActiveTab('home'); loadFiles(); }} />
-            </div>
-          </motion.div>
+          <Suspense fallback={<ViewSuspenseFallback />}>
+            <motion.div
+              initial={{ y: '100%' }}
+              animate={{ y: 0 }}
+              exit={{ y: '100%' }}
+              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+              className="fixed inset-0 bg-[#FAFAFA] z-50 flex flex-col"
+            >
+              <div className="p-4 flex justify-between items-center border-b border-neutral-200/60 bg-white shadow-sm">
+                <button onClick={() => { setShowCompressor(false); loadFiles(); }} className="p-2 hover:bg-neutral-100 rounded-full transition-colors">
+                  <X size={24} />
+                </button>
+                <h3 className="font-display font-bold">{t('sizeConverter')}</h3>
+                <div className="w-10" />
+              </div>
+              <div className="flex-1 overflow-y-auto no-scrollbar">
+                <CompressorView language={selectedLanguage} onComplete={() => { setShowCompressor(false); setActiveTab('home'); loadFiles(); }} />
+              </div>
+            </motion.div>
+          </Suspense>
         )}
       </AnimatePresence>
 
       {/* Merge Modal */}
       <AnimatePresence>
         {showMerge && (
-          <motion.div
-            initial={{ y: '100%' }}
-            animate={{ y: 0 }}
-            exit={{ y: '100%' }}
-            transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-            className="fixed inset-0 bg-[#FAFAFA] z-50 flex flex-col"
-          >
-            <div className="p-4 flex justify-between items-center border-b border-neutral-200/60 bg-white shadow-sm">
-              <button onClick={() => { setShowMerge(false); loadFiles(); }} className="p-2 hover:bg-neutral-100 rounded-full transition-colors">
-                <X size={24} />
-              </button>
-              <h3 className="font-display font-bold">{t('pdfMerge')}</h3>
-              <div className="w-10" />
-            </div>
-            <div className="flex-1 overflow-y-auto no-scrollbar">
-              <MergeView language={selectedLanguage} />
-            </div>
-          </motion.div>
+          <Suspense fallback={<ViewSuspenseFallback />}>
+            <motion.div
+              initial={{ y: '100%' }}
+              animate={{ y: 0 }}
+              exit={{ y: '100%' }}
+              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+              className="fixed inset-0 bg-[#FAFAFA] z-50 flex flex-col"
+            >
+              <div className="p-4 flex justify-between items-center border-b border-neutral-200/60 bg-white shadow-sm">
+                <button onClick={() => { setShowMerge(false); loadFiles(); }} className="p-2 hover:bg-neutral-100 rounded-full transition-colors">
+                  <X size={24} />
+                </button>
+                <h3 className="font-display font-bold">{t('pdfMerge')}</h3>
+                <div className="w-10" />
+              </div>
+              <div className="flex-1 overflow-y-auto no-scrollbar">
+                <MergeView language={selectedLanguage} />
+              </div>
+            </motion.div>
+          </Suspense>
         )}
       </AnimatePresence>
 
       {/* Split Modal */}
       <AnimatePresence>
         {showSplit && (
-          <motion.div
-            initial={{ y: '100%' }}
-            animate={{ y: 0 }}
-            exit={{ y: '100%' }}
-            transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-            className="fixed inset-0 bg-[#FAFAFA] z-50 flex flex-col"
-          >
-            <div className="p-4 flex justify-between items-center border-b border-neutral-200/60 bg-white shadow-sm">
-              <button onClick={() => { setShowSplit(false); loadFiles(); }} className="p-2 hover:bg-neutral-100 rounded-full transition-colors">
-                <X size={24} />
-              </button>
-              <h3 className="font-display font-bold">{t('splitPdf')}</h3>
-              <div className="w-10" />
-            </div>
-            <div className="flex-1 overflow-y-auto no-scrollbar">
-              <SplitView language={selectedLanguage} />
-            </div>
-          </motion.div>
+          <Suspense fallback={<ViewSuspenseFallback />}>
+            <motion.div
+              initial={{ y: '100%' }}
+              animate={{ y: 0 }}
+              exit={{ y: '100%' }}
+              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+              className="fixed inset-0 bg-[#FAFAFA] z-50 flex flex-col"
+            >
+              <div className="p-4 flex justify-between items-center border-b border-neutral-200/60 bg-white shadow-sm">
+                <button onClick={() => { setShowSplit(false); loadFiles(); }} className="p-2 hover:bg-neutral-100 rounded-full transition-colors">
+                  <X size={24} />
+                </button>
+                <h3 className="font-display font-bold">{t('splitPdf')}</h3>
+                <div className="w-10" />
+              </div>
+              <div className="flex-1 overflow-y-auto no-scrollbar">
+                <SplitView language={selectedLanguage} />
+              </div>
+            </motion.div>
+          </Suspense>
         )}
       </AnimatePresence>
 
       {/* Generic Tool Modal */}
       <AnimatePresence>
         {activeToolAction && (
-          <GenericToolFeature
-            toolId={activeToolAction}
-            language={selectedLanguage}
-            onClose={() => {
-              setActiveToolAction(null);
-              loadFiles();
-            }}
-          />
+          <Suspense fallback={<ViewSuspenseFallback />}>
+            <GenericToolFeature
+              toolId={activeToolAction}
+              language={selectedLanguage}
+              onClose={() => {
+                setActiveToolAction(null);
+                loadFiles();
+              }}
+            />
+          </Suspense>
         )}
       </AnimatePresence>
 
@@ -1549,7 +1420,6 @@ export default function App() {
             <div className="flex-1 overflow-y-auto no-scrollbar p-6 space-y-6">
 
               <div className="bg-white rounded-[24px] border border-neutral-200/60 shadow-sm overflow-hidden">
-                <SettingsOption icon={<Crown className="text-amber-500" />} label={t('pdfReaderPro')} onClick={() => setActiveSettingsModal('pro')} />
                 <SettingsOption icon={<Globe className="text-blue-500" />} label={t('language')} value={LANGUAGE_DISPLAY_NAMES[selectedLanguage] || selectedLanguage} onClick={() => setActiveSettingsModal('language')} />
               </div>
 
@@ -1565,7 +1435,7 @@ export default function App() {
 
               <div className="flex flex-col items-center justify-center pt-4 pb-2 space-y-1">
                 <p className="text-xs font-mono font-semibold text-neutral-400">Version 1.0.0</p>
-                <p className="text-[10px] font-medium text-neutral-300">© 2026 PDF Reader Pro</p>
+                <p className="text-[10px] font-medium text-neutral-300">© 2026 PDFO Reader &amp; Converter</p>
               </div>
 
             </div>
@@ -1588,8 +1458,6 @@ export default function App() {
                 <X size={24} />
               </button>
               <h3 className="font-display font-bold">
-                {activeSettingsModal === 'pro' && t('pdfReaderPro')}
-                {activeSettingsModal === 'payment' && 'Payment'}
                 {activeSettingsModal === 'language' && t('language')}
                 {activeSettingsModal === 'feedback' && t('feedback')}
                 {activeSettingsModal === 'rate' && t('rateUs')}
@@ -1598,240 +1466,6 @@ export default function App() {
               <div className="w-10" />
             </div>
             <div className="flex-1 overflow-y-auto no-scrollbar p-6">
-
-              {activeSettingsModal === 'pro' && (
-                <div className="flex flex-col items-center text-center space-y-8">
-                  <div className="w-24 h-24 bg-gradient-to-br from-amber-100 to-amber-200 rounded-full flex items-center justify-center shadow-lg shadow-amber-200/50">
-                    <Crown size={48} className="text-amber-600" />
-                  </div>
-
-                  <div className="space-y-4 w-full">
-                    <div className="flex items-center justify-center gap-3 text-lg font-medium text-neutral-700">
-                      <div className="w-6 h-6 rounded-full bg-green-100 flex items-center justify-center"><Check size={14} className="text-green-600" /></div>
-                      {t('allDocumentsReader')}
-                    </div>
-                    <div className="flex items-center justify-center gap-3 text-lg font-medium text-neutral-700">
-                      <div className="w-6 h-6 rounded-full bg-green-100 flex items-center justify-center"><Check size={14} className="text-green-600" /></div>
-                      {t('removeAllAds')}
-                    </div>
-                    <div className="flex items-center justify-center gap-3 text-lg font-medium text-neutral-700">
-                      <div className="w-6 h-6 rounded-full bg-green-100 flex items-center justify-center"><Check size={14} className="text-green-600" /></div>
-                      {t('bestExperience')}
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-4 w-full pt-4">
-                    <button
-                      onClick={() => setSelectedPlan('monthly')}
-                      className={cn(
-                        "p-6 rounded-[24px] border-2 transition-all flex flex-col items-center gap-2",
-                        selectedPlan === 'monthly' ? "border-amber-500 bg-amber-50 shadow-md" : "border-neutral-200 bg-white hover:border-amber-300"
-                      )}
-                    >
-                      <div className="font-bold text-neutral-600">{t('monthly')}</div>
-                      <div className="text-2xl font-display font-bold text-amber-600">7 Rs.</div>
-                    </button>
-                    <button
-                      onClick={() => setSelectedPlan('yearly')}
-                      className={cn(
-                        "p-6 rounded-[24px] border-2 transition-all flex flex-col items-center gap-2 relative",
-                        selectedPlan === 'yearly' ? "border-amber-500 bg-amber-50 shadow-md" : "border-neutral-200 bg-white hover:border-amber-300"
-                      )}
-                    >
-                      <div className="absolute -top-3 bg-amber-500 text-white text-[10px] font-bold px-3 py-1 rounded-full uppercase tracking-wider">{t('bestValue')}</div>
-                      <div className="font-bold text-neutral-600">{t('yearly')}</div>
-                      <div className="text-2xl font-display font-bold text-amber-600">49 Rs.</div>
-                    </button>
-                  </div>
-
-                  <button
-                    onClick={() => setActiveSettingsModal('payment')}
-                    className="w-full py-4 mt-4 rounded-full bg-gradient-to-r from-amber-400 to-amber-500 text-white font-bold text-lg shadow-xl shadow-amber-500/30 active:scale-[0.98] transition-all"
-                  >
-                    {t('continue')}
-                  </button>
-                </div>
-              )}
-
-              {activeSettingsModal === 'payment' && (
-                <div className="space-y-4 animate-fadeIn">
-                  <p className="text-center text-neutral-500 font-medium mb-6">Select your preferred payment method for the {selectedPlan} plan.</p>
-
-                  {/* UPI Expandable Option */}
-                  <div className="bg-white border border-neutral-200/60 rounded-[24px] overflow-hidden shadow-sm transition-all duration-300">
-                    <button
-                      onClick={() => {
-                        setIsUpiExpanded(!isUpiExpanded);
-                        setIsCardExpanded(false);
-                      }}
-                      className={cn(
-                        "w-full p-5 flex items-center justify-between font-bold text-lg transition-all",
-                        isUpiExpanded ? "bg-neutral-50 border-b border-neutral-100" : "hover:bg-neutral-50/50"
-                      )}
-                    >
-                      <div className="flex items-center gap-4">
-                        <div className="w-12 h-12 bg-green-50 rounded-xl flex items-center justify-center text-green-600"><Wallet size={24} /></div>
-                        <span>UPI</span>
-                      </div>
-                      <ChevronDown size={20} className={cn("text-neutral-400 transition-transform duration-300", isUpiExpanded && "rotate-180")} />
-                    </button>
-
-                    {isUpiExpanded && (
-                      <div className="p-4 bg-neutral-50/50 space-y-3 border-t border-neutral-100/60">
-                        <p className="text-xs text-neutral-500 font-semibold px-2 mb-1">CHOOSE AN APP TO PAY via UPI</p>
-                        <button
-                          onClick={() => handlePayment('phonepe')}
-                          className="w-full p-4 bg-white border border-neutral-200/50 rounded-2xl flex items-center gap-3.5 font-semibold text-base shadow-sm hover:border-indigo-500 active:scale-[0.99] transition-all"
-                        >
-                          <div className="w-9 h-9 bg-indigo-50 rounded-lg flex items-center justify-center text-indigo-600"><Smartphone size={18} /></div>
-                          Phone Pay
-                        </button>
-                        <button
-                          onClick={() => handlePayment('gpay')}
-                          className="w-full p-4 bg-white border border-neutral-200/50 rounded-2xl flex items-center gap-3.5 font-semibold text-base shadow-sm hover:border-blue-500 active:scale-[0.99] transition-all"
-                        >
-                          <div className="w-9 h-9 bg-blue-50 rounded-lg flex items-center justify-center text-blue-600"><Globe size={18} /></div>
-                          Google Pay
-                        </button>
-
-                        <div className="relative flex py-2 items-center">
-                          <div className="flex-grow border-t border-neutral-200"></div>
-                          <span className="flex-shrink mx-4 text-[10px] text-neutral-400 font-bold tracking-widest uppercase">Or Pay via UPI ID</span>
-                          <div className="flex-grow border-t border-neutral-200"></div>
-                        </div>
-
-                        <form onSubmit={handleUpiIdPayment} className="space-y-3">
-                          <div className="relative">
-                            <input
-                              type="text"
-                              required
-                              placeholder="username@upi"
-                              value={upiId}
-                              onChange={(e) => setUpiId(e.target.value)}
-                              className="w-full pl-4 pr-24 py-3 bg-white border border-neutral-200 rounded-xl text-sm font-semibold outline-none focus:border-green-500 transition-all font-mono"
-                            />
-                            <button
-                              type="submit"
-                              disabled={isProcessingUpiId}
-                              className="absolute right-1.5 top-1.5 bottom-1.5 px-4 bg-green-600 hover:bg-green-700 disabled:bg-neutral-400 text-white text-xs font-bold rounded-lg transition-all active:scale-[0.97] flex items-center justify-center min-w-[70px]"
-                            >
-                              {isProcessingUpiId ? (
-                                <Loader2 size={14} className="animate-spin" />
-                              ) : (
-                                "Pay Now"
-                              )}
-                            </button>
-                          </div>
-                        </form>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Add Card Expandable Option */}
-                  <div className="bg-white border border-neutral-200/60 rounded-[24px] overflow-hidden shadow-sm transition-all duration-300">
-                    <button
-                      onClick={() => {
-                        setIsCardExpanded(!isCardExpanded);
-                        setIsUpiExpanded(false);
-                      }}
-                      className={cn(
-                        "w-full p-5 flex items-center justify-between font-bold text-lg transition-all",
-                        isCardExpanded ? "bg-neutral-50 border-b border-neutral-100" : "hover:bg-neutral-50/50"
-                      )}
-                    >
-                      <div className="flex items-center gap-4">
-                        <div className="w-12 h-12 bg-amber-50 rounded-xl flex items-center justify-center text-amber-600"><CreditCard size={24} /></div>
-                        <span>Add Card</span>
-                      </div>
-                      <ChevronDown size={20} className={cn("text-neutral-400 transition-transform duration-300", isCardExpanded && "rotate-180")} />
-                    </button>
-
-                    {isCardExpanded && (
-                      <form onSubmit={handleCardPayment} className="p-5 bg-neutral-50/50 space-y-4 border-t border-neutral-100/60">
-                        <p className="text-xs text-neutral-500 font-semibold px-2 mb-1">ENTER YOUR DEBIT/CREDIT CARD DETAILS</p>
-
-                        <div className="space-y-3">
-                          <div>
-                            <label className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block mb-1 px-1">Card Number</label>
-                            <input
-                              type="text"
-                              required
-                              maxLength={19}
-                              placeholder="Enter Card Number"
-                              value={cardNumber}
-                              onChange={(e) => {
-                                const val = e.target.value.replace(/\D/g, '').replace(/(\d{4})(?=\d)/g, '$1 ');
-                                setCardNumber(val);
-                              }}
-                              className="w-full px-4 py-3 bg-white border border-neutral-200 rounded-xl text-sm font-semibold outline-none focus:border-amber-500 transition-all"
-                            />
-                          </div>
-
-                          <div className="grid grid-cols-2 gap-3">
-                            <div>
-                              <label className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block mb-1 px-1">Expiry Date</label>
-                              <input
-                                type="text"
-                                required
-                                maxLength={5}
-                                placeholder="MM/YY"
-                                value={cardExpiry}
-                                onChange={(e) => {
-                                  const val = e.target.value.replace(/\D/g, '');
-                                  let formattedVal = val;
-                                  if (val.length === 1 && val !== '0' && val !== '1') {
-                                    formattedVal = '0' + val;
-                                  } else if (val.length >= 2) {
-                                    const month = val.slice(0, 2);
-                                    const monthNum = parseInt(month, 10);
-                                    if (monthNum < 1 || monthNum > 12) {
-                                      return;
-                                    }
-                                  }
-                                  if (formattedVal.length <= 2) {
-                                    setCardExpiry(formattedVal);
-                                  } else {
-                                    setCardExpiry(`${formattedVal.slice(0, 2)}/${formattedVal.slice(2, 4)}`);
-                                  }
-                                }}
-                                className="w-full px-4 py-3 bg-white border border-neutral-200 rounded-xl text-sm font-semibold outline-none focus:border-amber-500 transition-all"
-                              />
-                            </div>
-
-                            <div>
-                              <label className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block mb-1 px-1">CVV</label>
-                              <input
-                                type="password"
-                                required
-                                maxLength={3}
-                                placeholder="***"
-                                value={cardCvv}
-                                onChange={(e) => setCardCvv(e.target.value.replace(/\D/g, ''))}
-                                className="w-full px-4 py-3 bg-white border border-neutral-200 rounded-xl text-sm font-semibold outline-none focus:border-amber-500 transition-all"
-                              />
-                            </div>
-                          </div>
-                        </div>
-
-                        <button
-                          type="submit"
-                          disabled={isProcessingCard}
-                          className="w-full py-3.5 bg-neutral-900 text-white font-bold rounded-xl text-sm shadow-md hover:bg-neutral-800 transition-all active:scale-[0.98] disabled:bg-neutral-400 flex items-center justify-center gap-2"
-                        >
-                          {isProcessingCard ? (
-                            <>
-                              <Loader2 size={16} className="animate-spin" />
-                              <span>Processing Payment...</span>
-                            </>
-                          ) : (
-                            <span>Pay Rs. {selectedPlan === 'yearly' ? '49' : '7'} Now</span>
-                          )}
-                        </button>
-                      </form>
-                    )}
-                  </div>
-                </div>
-              )}
 
               {activeSettingsModal === 'language' && (
                 <div className="space-y-4">
@@ -1854,17 +1488,6 @@ export default function App() {
                         {selectedLanguage === lang && <Check size={20} />}
                       </button>
                     ))}
-                  </div>
-
-                  {/* Language sync alert */}
-                  <div className="p-4 bg-emerald-50/70 border border-emerald-200/60 rounded-3xl flex items-start gap-3 shadow-sm select-none">
-                    <span className="p-1 px-2.5 rounded-xl bg-emerald-500 text-white font-extrabold text-[9px] uppercase tracking-wider mt-0.5 shadow-sm shadow-emerald-500/10">{t('active')}</span>
-                    <div className="space-y-1">
-                      <p className="text-xs font-bold text-neutral-800 leading-snug">{t('syncedReader')}</p>
-                      <p className="text-[11px] font-medium text-neutral-500 leading-relaxed">
-                        {t('languageSyncDesc')}
-                      </p>
-                    </div>
                   </div>
                 </div>
               )}
@@ -1938,72 +1561,6 @@ export default function App() {
                     {t('sendToOwner')}
                   </button>
 
-                  {/* Google Sheets Webhook Configuration for Feedback */}
-                  <div className="bg-white border border-neutral-200/60 rounded-[24px] p-5 space-y-4 shadow-sm">
-                    <button
-                      type="button"
-                      onClick={() => setShowFeedbackWebhookSetup(!showFeedbackWebhookSetup)}
-                      className="w-full flex items-center justify-between font-bold text-sm text-neutral-700 hover:text-neutral-900 transition-colors"
-                    >
-                      <span className="flex items-center gap-2">
-                        <Database size={18} className="text-emerald-500" />
-                        Google Sheets Sync Settings
-                      </span>
-                      {showFeedbackWebhookSetup ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-                    </button>
-
-                    <div className="flex items-center gap-2 text-xs font-semibold text-neutral-500">
-                      <span className={cn(
-                        "w-2.5 h-2.5 rounded-full",
-                        feedbackWebhook.trim() ? "bg-emerald-500 animate-pulse" : "bg-neutral-300"
-                      )} />
-                      {feedbackWebhook.trim() ? "Google Sheet Connected (Feedback)" : "Google Sheet Sync Disconnected"}
-                    </div>
-
-                    {showFeedbackWebhookSetup && (
-                      <div className="space-y-4 pt-2 border-t border-neutral-100">
-                        <div className="space-y-1.5">
-                          <label className="text-xs font-bold text-neutral-600">Google Apps Script Web App URL</label>
-                          <input
-                            type="text"
-                            placeholder="https://script.google.com/macros/s/.../exec"
-                            value={feedbackWebhook}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setFeedbackWebhook(val);
-                              localStorage.setItem('VITE_FEEDBACK_WEBHOOK_URL', val);
-                            }}
-                            className="w-full px-4 py-2.5 bg-neutral-50 border border-neutral-200 rounded-xl text-sm font-medium focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all"
-                          />
-                        </div>
-
-                        <div className="p-4 bg-emerald-50/70 rounded-2xl space-y-3">
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-bold text-emerald-800">Apps Script Setup Code</span>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const code = `function doPost(e) {\n  try {\n    var data = JSON.parse(e.postData.contents);\n    var ss = SpreadsheetApp.getActiveSpreadsheet();\n    var type = data.type || (data.rating !== undefined ? "rating" : "feedback");\n    var sheetName = type === "rating" ? "Ratings" : "Feedback";\n    var sheet = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);\n    \n    if (sheet.getLastRow() === 0) {\n      if (type === "rating") {\n        sheet.appendRow(["Timestamp", "Rating (Stars)", "Language"]);\n      } else {\n        sheet.appendRow(["Timestamp", "Feedback Text", "Language"]);\n      }\n    }\n    \n    if (type === "rating") {\n      sheet.appendRow([\n        data.timestamp || new Date().toLocaleString(),\n        data.rating || 0,\n        data.language || "English"\n      ]);\n    } else {\n      sheet.appendRow([\n        data.timestamp || new Date().toLocaleString(),\n        data.text || "",\n        data.language || "English"\n      ]);\n    }\n    return ContentService.createTextOutput(JSON.stringify({ result: "success" }))\n      .setMimeType(ContentService.MimeType.JSON);\n  } catch (error) {\n    return ContentService.createTextOutput(JSON.stringify({ result: "error", error: error.toString() }))\n      .setMimeType(ContentService.MimeType.JSON);\n  }\n}`;
-                                navigator.clipboard.writeText(code);
-                                setCopiedFeedbackSetup(true);
-                                setTimeout(() => setCopiedFeedbackSetup(false), 2000);
-                              }}
-                              className="px-2.5 py-1 text-[11px] font-bold bg-white text-emerald-700 hover:bg-neutral-50 rounded-lg shadow-sm border border-emerald-100 flex items-center gap-1.5 transition-all"
-                            >
-                              <Copy size={12} />
-                              {copiedFeedbackSetup ? "Copied!" : "Copy Code"}
-                            </button>
-                          </div>
-
-                          <p className="text-[11px] text-emerald-700 leading-relaxed font-semibold">
-                            Step 1: Open Google Sheets and click <strong className="font-extrabold text-emerald-900">Extensions &gt; Apps Script</strong>.<br />
-                            Step 2: Paste the copied code and click Deploy &gt; New deployment &gt; Web app (Set Access to <strong className="font-extrabold text-emerald-900">"Anyone"</strong>).<br />
-                            Step 3: Copy the Web App URL and paste it into the field above. That's it!
-                          </p>
-                        </div>
-                      </div>
-                    )}
-                  </div>
 
                   {/* Feedback History Log */}
                   {localFeedbacks.length > 0 && (
@@ -2117,119 +1674,6 @@ export default function App() {
                     {isSubmittingRating && <Loader2 size={20} className="animate-spin" />}
                     {t('submit')}
                   </button>
-
-                  {/* Google Sheets Webhook Configuration for Rating */}
-                  <div className="bg-white border border-neutral-200/60 rounded-[24px] p-5 space-y-4 shadow-sm">
-                    <button
-                      type="button"
-                      onClick={() => setShowRatingWebhookSetup(!showRatingWebhookSetup)}
-                      className="w-full flex items-center justify-between font-bold text-sm text-neutral-700 hover:text-neutral-900 transition-colors"
-                    >
-                      <span className="flex items-center gap-2">
-                        <Database size={18} className="text-amber-500" />
-                        Google Sheets Sync Settings
-                      </span>
-                      {showRatingWebhookSetup ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-                    </button>
-
-                    <div className="flex items-center gap-2 text-xs font-semibold text-neutral-500">
-                      <span className={cn(
-                        "w-2.5 h-2.5 rounded-full",
-                        ratingWebhook.trim() ? "bg-amber-500 animate-pulse" : "bg-neutral-300"
-                      )} />
-                      {ratingWebhook.trim() ? "Google Sheet Connected (Rating)" : "Google Sheet Sync Disconnected"}
-                    </div>
-
-                    {showRatingWebhookSetup && (
-                      <div className="space-y-4 pt-2 border-t border-neutral-100">
-                        <div className="space-y-1.5">
-                          <label className="text-xs font-bold text-neutral-600">Google Apps Script Web App URL</label>
-                          <input
-                            type="text"
-                            placeholder="https://script.google.com/macros/s/.../exec"
-                            value={ratingWebhook}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setRatingWebhook(val);
-                              localStorage.setItem('VITE_RATING_WEBHOOK_URL', val);
-                            }}
-                            className="w-full px-4 py-2.5 bg-neutral-50 border border-neutral-200 rounded-xl text-sm font-medium focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all"
-                          />
-                        </div>
-
-                        <div className="p-4 bg-amber-50/70 rounded-2xl space-y-3">
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-bold text-amber-800">Apps Script Setup Code</span>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const code = `function doPost(e) {\n  try {\n    var data = JSON.parse(e.postData.contents);\n    var ss = SpreadsheetApp.getActiveSpreadsheet();\n    var type = data.type || (data.rating !== undefined ? "rating" : "feedback");\n    var sheetName = type === "rating" ? "Ratings" : "Feedback";\n    var sheet = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);\n    \n    if (sheet.getLastRow() === 0) {\n      if (type === "rating") {\n        sheet.appendRow(["Timestamp", "Rating (Stars)", "Language"]);\n      } else {\n        sheet.appendRow(["Timestamp", "Feedback Text", "Language"]);\n      }\n    }\n    \n    if (type === "rating") {\n      sheet.appendRow([\n        data.timestamp || new Date().toLocaleString(),\n        data.rating || 0,\n        data.language || "English"\n      ]);\n    } else {\n      sheet.appendRow([\n        data.timestamp || new Date().toLocaleString(),\n        data.text || "",\n        data.language || "English"\n      ]);\n    }\n    return ContentService.createTextOutput(JSON.stringify({ result: "success" }))\n      .setMimeType(ContentService.MimeType.JSON);\n  } catch (error) {\n    return ContentService.createTextOutput(JSON.stringify({ result: "error", error: error.toString() }))\n      .setMimeType(ContentService.MimeType.JSON);\n  }\n}`;
-                                navigator.clipboard.writeText(code);
-                                setCopiedRatingSetup(true);
-                                setTimeout(() => setCopiedRatingSetup(false), 2000);
-                              }}
-                              className="px-2.5 py-1 text-[11px] font-bold bg-white text-amber-700 hover:bg-neutral-50 rounded-lg shadow-sm border border-amber-100 flex items-center gap-1.5 transition-all"
-                            >
-                              <Copy size={12} />
-                              {copiedRatingSetup ? "Copied!" : "Copy Code"}
-                            </button>
-                          </div>
-
-                          <p className="text-[11px] text-amber-700 leading-relaxed font-semibold">
-                            Step 1: Open Google Sheets and click <strong className="font-extrabold text-amber-900">Extensions &gt; Apps Script</strong>.<br />
-                            Step 2: Paste the copied code and click Deploy &gt; New deployment &gt; Web app (Set Access to <strong className="font-extrabold text-amber-900">"Anyone"</strong>).<br />
-                            Step 3: Copy the Web App URL and paste it into the field above. That's it!
-                          </p>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Rating History Log */}
-                  {localRatings.length > 0 && (
-                    <div className="bg-white border border-neutral-200/60 rounded-[24px] p-5 space-y-4 shadow-sm">
-                      <div className="flex justify-between items-center border-b border-neutral-100 pb-2">
-                        <span className="font-bold text-sm text-neutral-700 flex items-center gap-2">
-                          <Star size={18} className="text-amber-500 fill-amber-500" />
-                          Ratings History Log ({localRatings.length})
-                        </span>
-                        {localRatings.some(r => !r.synced) && (
-                          <button
-                            onClick={() => syncPendingItems('rating')}
-                            className="text-xs font-bold text-blue-600 hover:text-blue-800 transition-colors flex items-center gap-1 bg-blue-50 px-2 py-1.5 rounded-lg active:scale-95 transition-all"
-                          >
-                            Sync Pending
-                          </button>
-                        )}
-                      </div>
-                      <div className="max-h-48 overflow-y-auto space-y-2 pr-1 no-scrollbar">
-                        {localRatings.map(rt => (
-                          <div key={rt.id} className="p-3 bg-neutral-50 rounded-xl space-y-1 text-xs border border-neutral-100 relative">
-                            <div className="flex justify-between items-start">
-                              <span className="text-neutral-400 font-mono font-medium">{rt.timestamp}</span>
-                              <span className={cn(
-                                "flex items-center gap-1 font-bold text-[10px] px-2 py-0.5 rounded-full",
-                                rt.synced ? "text-emerald-700 bg-emerald-50" : "text-amber-700 bg-amber-50"
-                              )}>
-                                {rt.synced ? <Check size={10} /> : <Database size={10} />}
-                                {rt.synced ? "Synced" : "Local Only"}
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-1 mt-1 text-amber-400">
-                              {[1, 2, 3, 4, 5].map(star => (
-                                <Star
-                                  key={star}
-                                  size={14}
-                                  className={star <= rt.rating ? "fill-amber-400 text-amber-400" : "text-neutral-200"}
-                                />
-                              ))}
-                            </div>
-                            <div className="text-[10px] text-neutral-400">Language: {rt.language}</div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
                 </div>
               )}
 
@@ -2237,7 +1681,6 @@ export default function App() {
                 <div className="bg-white p-6 rounded-[24px] border border-neutral-200/60 shadow-sm space-y-4 text-neutral-600 leading-relaxed">
                   <p>{t('dataCollection')}</p>
                   <p>{t('fileSecurity')}</p>
-                  <p>{t('thirdPartyServices')}</p>
                   <p>{t('userRights')}</p>
                   <p>{t('updatesPolicy')}</p>
                 </div>
@@ -2250,20 +1693,18 @@ export default function App() {
 
       <AnimatePresence>
         {adCallback && (
-          <AdPlayerModal
-            onComplete={() => {
-              adCallback.run();
-              setAdCallback(null);
-            }}
-            onGoPro={() => {
-              setAdCallback(null);
-              setShowSettings(true);
-              setActiveSettingsModal('pro');
-            }}
-            onClose={() => {
-              setAdCallback(null);
-            }}
-          />
+          <Suspense fallback={<ViewSuspenseFallback />}>
+            <AdPlayerModal
+              onComplete={() => {
+                adCallback.run();
+                setAdCallback(null);
+              }}
+              onClose={() => {
+                isOpeningDocRef.current = false;
+                setAdCallback(null);
+              }}
+            />
+          </Suspense>
         )}
       </AnimatePresence>
     </div>
@@ -2287,17 +1728,297 @@ function SettingsOption({ icon, label, value, onClick }: { icon: React.ReactNode
   );
 }
 
-function NavButton({ active, onClick, icon, label }: { active: boolean, onClick: () => void, icon: React.ReactNode, label: string }) {
+const NavButton = React.memo(function NavButton({ tab, active, onSelect, icon, label }: { tab: TabType, active: boolean, onSelect: (tab: TabType) => void, icon: React.ReactNode, label: string }) {
   return (
     <button
-      onClick={onClick}
+      onClick={() => onSelect(tab)}
       className={cn(
-        "flex flex-col items-center gap-1 transition-colors",
-        active ? "text-red-500" : "text-neutral-400"
+        "flex flex-col items-center gap-1 transition-all duration-150 select-none active:scale-90",
+        active ? "text-red-500 scale-105" : "text-neutral-400 hover:text-neutral-600"
       )}
     >
       {icon}
       <span className="text-[10px] font-bold uppercase tracking-wider">{label}</span>
     </button>
   );
+});
+
+interface HomeTabProps {
+  files: DocFile[];
+  recentFiles: DocFile[];
+  searchQuery: string;
+  onSearchChange: (query: string) => void;
+  onOpenSettings: () => void;
+  onOpenQRScanner: () => void;
+  onOpenCompressor: () => void;
+  onOpenMerge: () => void;
+  onOpenSplit: () => void;
+  onFileClick: (file: DocFile) => void;
+  onRenameFile: (id: string, newName: string) => void;
+  onDeleteFile: (id: string) => void;
+  onShareFile: (file: DocFile) => void;
+  onShareFiles: (files: DocFile[]) => void;
+  onDownloadFile: (file: DocFile) => void;
+  language: string;
+  onRefresh: () => void;
 }
+
+const HomeTab = React.memo(function HomeTab({
+  files,
+  recentFiles,
+  searchQuery,
+  onSearchChange,
+  onOpenSettings,
+  onOpenQRScanner,
+  onOpenCompressor,
+  onOpenMerge,
+  onOpenSplit,
+  onFileClick,
+  onRenameFile,
+  onDeleteFile,
+  onShareFile,
+  onShareFiles,
+  onDownloadFile,
+  language,
+  onRefresh
+}: HomeTabProps) {
+  const t = getTranslator(language);
+  const searchResults = useMemo(() => {
+    if (!searchQuery.trim()) return [];
+    const q = searchQuery.toLowerCase();
+    return files.filter(f => f.name.toLowerCase().includes(q));
+  }, [files, searchQuery]);
+
+  return (
+    <div className="space-y-8 pb-32 pt-10">
+      <header className="flex justify-between items-center px-6">
+        <div>
+          <h1 className="text-3xl font-display font-bold text-neutral-900 tracking-tight">{t('pdfReader')}</h1>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={onOpenSettings}
+            className="w-12 h-12 rounded-full bg-white border border-neutral-200/60 shadow-sm flex items-center justify-center text-neutral-600 hover:bg-neutral-50 transition-colors active:scale-95"
+          >
+            <Settings size={22} />
+          </button>
+        </div>
+      </header>
+
+      <div className="px-6 relative z-50">
+        <div className="relative group">
+          <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-neutral-400 group-focus-within:text-red-500 transition-colors" size={20} />
+          <input
+            type="text"
+            placeholder={t('searchPlaceholder')}
+            value={searchQuery}
+            onChange={(e) => onSearchChange(e.target.value)}
+            className="w-full bg-white border border-neutral-200/60 shadow-sm rounded-full py-4 pl-14 pr-6 text-sm font-medium focus:ring-4 focus:ring-red-500/10 focus:border-red-500 outline-none transition-all"
+          />
+          {searchQuery && (
+            <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-neutral-200 shadow-xl rounded-2xl max-h-60 overflow-y-auto w-full z-50">
+              {searchResults.length > 0 ? (
+                searchResults.map(file => (
+                  <button
+                    key={file.id}
+                    onClick={() => {
+                      onFileClick(file);
+                      onSearchChange('');
+                    }}
+                    className="w-full text-left px-4 py-3 hover:bg-neutral-50 transition-colors border-b border-neutral-100 last:border-0 flex items-center gap-3"
+                  >
+                    <div className="w-10 h-10 bg-neutral-100 rounded-xl flex items-center justify-center shrink-0">
+                      <Files size={18} className="text-neutral-500" />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="font-semibold text-neutral-900 truncate text-sm">{file.name}</p>
+                      <p className="text-xs text-neutral-500 truncate">{formatFileSize(file.size)}</p>
+                    </div>
+                  </button>
+                ))
+              ) : (
+                <div className="p-4 text-center text-sm font-medium text-neutral-500">
+                  {t('noMatches')} "{searchQuery}"
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-4 gap-4 px-6">
+        <button
+          onClick={onOpenQRScanner}
+          className="flex flex-col items-center gap-3 group active:scale-95 transition-transform"
+        >
+          <div className="w-16 h-16 bg-white border border-neutral-200/60 rounded-[24px] flex items-center justify-center text-red-500 shadow-sm group-hover:scale-105 group-hover:shadow-md group-hover:border-red-200 transition-all duration-300">
+            <QrCode size={28} strokeWidth={1.5} />
+          </div>
+          <span className="text-[11px] font-bold text-neutral-600 tracking-tight uppercase whitespace-nowrap">{t('qrScanner')}</span>
+        </button>
+
+        <button
+          onClick={onOpenCompressor}
+          className="flex flex-col items-center gap-3 group active:scale-95 transition-transform"
+        >
+          <div className="w-16 h-16 bg-white border border-neutral-200/60 rounded-[24px] flex items-center justify-center text-neutral-900 shadow-sm group-hover:scale-105 group-hover:shadow-md group-hover:border-neutral-300 transition-all duration-300">
+            <Minimize2 size={28} strokeWidth={1.5} />
+          </div>
+          <span className="text-[11px] font-bold text-neutral-600 tracking-wide uppercase">{t('compress')}</span>
+        </button>
+
+        <button
+          onClick={onOpenMerge}
+          className="flex flex-col items-center gap-3 group active:scale-95 transition-transform"
+        >
+          <div className="w-16 h-16 bg-white border border-neutral-200/60 rounded-[24px] flex items-center justify-center text-indigo-600 shadow-sm group-hover:scale-105 group-hover:shadow-md group-hover:border-indigo-200 transition-all duration-300">
+            <Merge size={28} strokeWidth={1.5} />
+          </div>
+          <span className="text-[11px] font-bold text-neutral-600 tracking-wide uppercase">{t('merge')}</span>
+        </button>
+
+        <button
+          onClick={onOpenSplit}
+          className="flex flex-col items-center gap-3 group active:scale-95 transition-transform"
+        >
+          <div className="w-16 h-16 bg-white border border-neutral-200/60 rounded-[24px] flex items-center justify-center text-orange-500 shadow-sm group-hover:scale-105 group-hover:shadow-md group-hover:border-orange-200 transition-all duration-300">
+            <Scissors size={28} strokeWidth={1.5} />
+          </div>
+          <span className="text-[11px] font-bold text-neutral-600 tracking-wide uppercase">{t('split')}</span>
+        </button>
+      </div>
+
+      <FileList
+        title={files.length > 0 ? "Your Documents" : "Recent Documents"}
+        files={files.length > 0 ? files : recentFiles}
+        onFileClick={onFileClick}
+        onRenameFile={onRenameFile}
+        onDeleteFile={onDeleteFile}
+        onShareFile={onShareFile}
+        onShareFiles={onShareFiles}
+        onDownloadFile={onDownloadFile}
+        language={language}
+        onRefresh={onRefresh}
+      />
+    </div>
+  );
+});
+
+interface FilesTabProps {
+  files: DocFile[];
+  activeCategory: string;
+  onSelectCategory: (cat: string) => void;
+  onFileClick: (file: DocFile) => void;
+  onRenameFile: (id: string, newName: string) => void;
+  onDeleteFile: (id: string) => void;
+  onShareFile: (file: DocFile) => void;
+  onShareFiles: (files: DocFile[]) => void;
+  onDownloadFile: (file: DocFile) => void;
+  language: string;
+  onRefresh: () => void;
+  onTouchStart?: (e: React.TouchEvent) => void;
+  onTouchMove?: (e: React.TouchEvent) => void;
+  onTouchEnd?: () => void;
+}
+
+const FilesTab = React.memo(function FilesTab({
+  files,
+  activeCategory,
+  onSelectCategory,
+  onFileClick,
+  onRenameFile,
+  onDeleteFile,
+  onShareFile,
+  onShareFiles,
+  onDownloadFile,
+  language,
+  onRefresh,
+  onTouchStart,
+  onTouchMove,
+  onTouchEnd
+}: FilesTabProps) {
+  const t = getTranslator(language);
+
+  return (
+    <div 
+      className="space-y-6 pb-32 pt-10"
+      onTouchStart={onTouchStart}
+      onTouchMove={onTouchMove}
+      onTouchEnd={onTouchEnd}
+    >
+      <div className="flex justify-between items-center px-6">
+        <h2 className="text-3xl font-display font-bold tracking-tight">{t('allFiles')}</h2>
+      </div>
+      <div className="flex gap-2 overflow-x-auto pb-2 px-6 no-scrollbar">
+        {['All', 'PDF', 'EXCEL', 'DOC', 'PPT', 'EPUB', 'IMAGES'].map(cat => (
+          <button
+            key={cat}
+            onClick={() => onSelectCategory(cat)}
+            className={cn(
+              "px-6 py-2.5 rounded-full text-sm font-semibold whitespace-nowrap transition-all duration-200 active:scale-95",
+              activeCategory === cat
+                ? "bg-neutral-900 text-white shadow-md"
+                : "bg-white border border-neutral-200/60 text-neutral-600 hover:bg-neutral-50 hover:border-neutral-300"
+            )}
+          >
+            {cat}
+          </button>
+        ))}
+      </div>
+      <FileList
+        files={files}
+        onFileClick={onFileClick}
+        onRenameFile={onRenameFile}
+        onDeleteFile={onDeleteFile}
+        onShareFile={onShareFile}
+        onShareFiles={onShareFiles}
+        onDownloadFile={onDownloadFile}
+        language={language}
+        onRefresh={onRefresh}
+      />
+    </div>
+  );
+});
+
+interface RecentTabProps {
+  files: DocFile[];
+  onFileClick: (file: DocFile) => void;
+  onRenameFile: (id: string, newName: string) => void;
+  onDeleteFile: (id: string) => void;
+  onShareFile: (file: DocFile) => void;
+  onShareFiles: (files: DocFile[]) => void;
+  onDownloadFile: (file: DocFile) => void;
+  language: string;
+  onRefresh: () => void;
+}
+
+const RecentTab = React.memo(function RecentTab({
+  files,
+  onFileClick,
+  onRenameFile,
+  onDeleteFile,
+  onShareFile,
+  onShareFiles,
+  onDownloadFile,
+  language,
+  onRefresh
+}: RecentTabProps) {
+  const t = getTranslator(language);
+
+  return (
+    <div className="space-y-6 pb-32 pt-10">
+      <h2 className="text-3xl font-display font-bold px-6 tracking-tight">{t('recentlyOpened')}</h2>
+      <FileList
+        files={files}
+        onFileClick={onFileClick}
+        onRenameFile={onRenameFile}
+        onDeleteFile={onDeleteFile}
+        onShareFile={onShareFile}
+        onShareFiles={onShareFiles}
+        onDownloadFile={onDownloadFile}
+        language={language}
+        onRefresh={onRefresh}
+      />
+    </div>
+  );
+});

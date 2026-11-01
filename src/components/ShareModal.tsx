@@ -971,16 +971,18 @@ export const ShareModal: React.FC<ShareModalProps> = ({ files, onClose, onDownlo
   // Check if we are inside a sandboxed iframe
   const isIframe = typeof window !== 'undefined' && window.self !== window.top;
 
+  const PLAY_STORE_URL = 'https://play.google.com/store/apps/details?id=com.pdforeader.app';
+
   // Create shareable message text containing details about the shared items
   const shareMessage = isMultiple 
-    ? `I'm using PDF Reader Pro to manage offline files. Sharing ${files.length} secure documents (Total Size: ${formattedSize}). View them safely and offline here: ${window.location.origin}`
-    : `Check out my offline document: "${primaryFile.name}" (Format: ${primaryFile.type.toUpperCase()}, Size: ${(primaryFile.size / 1024).toFixed(1)} KB). View, print, and convert documents locally: ${window.location.origin}`;
+    ? `I'm using PDFO Reader & Converter to manage offline files. Sharing ${files.length} secure documents (Total Size: ${formattedSize}). Download the app on Google Play: ${PLAY_STORE_URL}`
+    : `Check out my offline document: "${primaryFile.name}" (Format: ${primaryFile.type.toUpperCase()}, Size: ${(primaryFile.size / 1024).toFixed(1)} KB). Opened with PDFO Reader & Converter: ${PLAY_STORE_URL}`;
 
   const handleCopyLink = () => {
     try {
-      navigator.clipboard.writeText(window.location.origin);
+      navigator.clipboard.writeText(PLAY_STORE_URL);
       setCopiedLink(true);
-      setSuccessMsg("App link copied to clipboard!");
+      setSuccessMsg("Play Store link copied to clipboard!");
       setTimeout(() => {
         setCopiedLink(false);
         setSuccessMsg(null);
@@ -1000,9 +1002,9 @@ export const ShareModal: React.FC<ShareModalProps> = ({ files, onClose, onDownlo
           infoText += `${i + 1}. ${f.name} | Size: ${(f.size / 1024).toFixed(1)} KB | Format: ${f.type.toUpperCase()}\n`;
         });
         infoText += `Total files: ${files.length} | Total Size: ${formattedSize}\n`;
-        infoText += `Access link: ${window.location.origin}`;
+        infoText += `Get the app: ${PLAY_STORE_URL}`;
       } else {
-        infoText = `=== Shared Document Details ===\nName: ${primaryFile.name}\nSize: ${(primaryFile.size / 1024).toFixed(1)} KB\nFormat: ${primaryFile.type.toUpperCase()}\nOpened locally with PDF Reader Pro.\nAccess link: ${window.location.origin}`;
+        infoText = `=== Shared Document Details ===\nName: ${primaryFile.name}\nSize: ${(primaryFile.size / 1024).toFixed(1)} KB\nFormat: ${primaryFile.type.toUpperCase()}\nOpened with PDFO Reader & Converter.\nGet the app: ${PLAY_STORE_URL}`;
       }
 
       navigator.clipboard.writeText(infoText);

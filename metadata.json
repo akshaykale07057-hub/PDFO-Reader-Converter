@@ -1,5 +1,5 @@
 {
-  "name": "PDFO Reader",
+  "name": "PDFO Reader & Converter",
   "description": "Smart document reader with automatic local storage sync, password protection, and direct multi-format viewing (PDF, Office, etc).",
   "requestFramePermissions": [
     "camera"
