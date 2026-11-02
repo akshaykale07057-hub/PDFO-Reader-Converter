@@ -5,6 +5,8 @@ const config: CapacitorConfig = {
   appName: 'PDFO Reader & Converter',
   webDir: 'dist',
   server: {
+    url: 'https://pdfo-reader-converter.onrender.com',
+    cleartext: true,
     androidScheme: 'https'
   },
   plugins: {
