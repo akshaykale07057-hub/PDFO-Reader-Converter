@@ -23,6 +23,7 @@ import { storageService } from '../services/storageService';
 import { adService } from '../services/adService';
 import { DocFile, FileType } from '../types';
 import { getTranslator } from '../utils/translator';
+import { getApiBaseUrl } from '../utils/apiConfig';
 
 interface GenericToolFeatureProps {
   toolId: string;
@@ -501,8 +502,8 @@ export const GenericToolFeature: React.FC<GenericToolFeatureProps> = ({ toolId, 
                const formData = new FormData();
                formData.append("file", file, file.name);
                try {
-                 const res = await fetch("/api/convert/pdf", { method: "POST", body: formData });
-                 if (res.ok) {
+                  const res = await fetch(`${getApiBaseUrl()}/api/convert/pdf`, { method: "POST", body: formData });
+                  if (res.ok) {
                     blob = await res.blob();
                     extractedHtml = null;
                     docxContainer = null;

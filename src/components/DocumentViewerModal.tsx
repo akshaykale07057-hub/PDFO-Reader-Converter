@@ -10,6 +10,7 @@ import { DocFile } from '../types';
 import { storageService } from '../services/storageService';
 import { directShareFile, downloadDocumentFile } from '../utils/shareUtils';
 import { getTranslator } from '../utils/translator';
+import { getApiBaseUrl } from '../utils/apiConfig';
 import * as mammoth from 'mammoth';
 import * as XLSX from 'xlsx';
 import { PDFDocument } from 'pdf-lib';
@@ -2102,7 +2103,24 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
         throw new Error("Could not load original file data.");
       }
 
-      const pdfBlob = await convertFileToPdfLocal(blob, file.name);
+      let pdfBlob: Blob;
+      try {
+        const formData = new FormData();
+        formData.append("file", blob, file.name);
+        const serverRes = await fetch(`${getApiBaseUrl()}/api/convert/pdf`, {
+          method: "POST",
+          body: formData,
+        });
+        if (serverRes.ok) {
+          pdfBlob = await serverRes.blob();
+        } else {
+          throw new Error("Server conversion returned non-200");
+        }
+      } catch (serverErr) {
+        console.warn("Server conversion failed, using local converter fallback:", serverErr);
+        pdfBlob = await convertFileToPdfLocal(blob, file.name);
+      }
+
       const arrayBuffer = await pdfBlob.arrayBuffer();
 
       const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) });
@@ -2404,7 +2422,23 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
         throw new Error("Could not load original file data.");
       }
 
-      const pdfBlob = await convertFileToPdfLocal(blob, file.name);
+      let pdfBlob: Blob;
+      try {
+        const formData = new FormData();
+        formData.append("file", blob, file.name);
+        const serverRes = await fetch(`${getApiBaseUrl()}/api/convert/pdf`, {
+          method: "POST",
+          body: formData,
+        });
+        if (serverRes.ok) {
+          pdfBlob = await serverRes.blob();
+        } else {
+          throw new Error("Server conversion returned non-200");
+        }
+      } catch (serverErr) {
+        console.warn("Server conversion failed, using local converter fallback:", serverErr);
+        pdfBlob = await convertFileToPdfLocal(blob, file.name);
+      }
       
       const rawName = file.name.substring(0, file.name.lastIndexOf('.')) || file.name;
       const pdfFileName = `${rawName}.pdf`;
@@ -2793,7 +2827,7 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
               const formData = new FormData();
               formData.append("file", blob, file.name);
 
-              const uploadRes = await fetch("/api/upload", {
+              const uploadRes = await fetch(`${getApiBaseUrl()}/api/upload`, {
                 method: "POST",
                 body: formData,
               });

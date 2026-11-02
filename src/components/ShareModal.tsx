@@ -17,6 +17,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
 import { Capacitor } from '@capacitor/core';
 import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
+import { getApiBaseUrl } from '../utils/apiConfig';
 
 interface ShareModalProps {
   files: DocFile[];
@@ -70,14 +71,14 @@ export const ShareModal: React.FC<ShareModalProps> = ({ files, onClose, onDownlo
       const formData = new FormData();
       formData.append("file", fileData, primaryFile.name);
       
-      const uploadRes = await fetch("/api/upload", { method: "POST", body: formData });
+      const uploadRes = await fetch(`${getApiBaseUrl()}/api/upload`, { method: "POST", body: formData });
       if (!uploadRes.ok) throw new Error("Failed to sync file to server for sharing.");
       
       const uploadData = await uploadRes.json();
       const serverFilename = uploadData.filename;
 
       // Ask for link
-      const response = await fetch('/api/share/generate', {
+      const response = await fetch(`${getApiBaseUrl()}/api/share/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
