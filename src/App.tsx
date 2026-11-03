@@ -30,7 +30,8 @@ import {
   Download,
   QrCode,
   Database,
-  ExternalLink
+  ExternalLink,
+  ArrowLeft
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Capacitor } from '@capacitor/core';
@@ -180,7 +181,14 @@ export default function App() {
       subs.push(Keyboard.addListener('keyboardWillShow', () => setIsKeyboardOpen(true)));
       subs.push(Keyboard.addListener('keyboardDidShow', () => setIsKeyboardOpen(true)));
       subs.push(Keyboard.addListener('keyboardWillHide', () => setIsKeyboardOpen(false)));
-      subs.push(Keyboard.addListener('keyboardDidHide', () => setIsKeyboardOpen(false)));
+      subs.push(Keyboard.addListener('keyboardDidHide', () => {
+        setIsKeyboardOpen(false);
+        const activeTag = document.activeElement?.tagName;
+        if (activeTag === 'INPUT' || activeTag === 'TEXTAREA') {
+          (document.activeElement as HTMLElement)?.blur();
+          setIsSearchFocused(false);
+        }
+      }));
     } catch (_) {}
 
     return () => {
@@ -253,8 +261,25 @@ export default function App() {
     }
   }, [getActiveScrollContainer]);
 
+  const handleCancelSearch = useCallback(() => {
+    setSearchQuery('');
+    setIsSearchFocused(false);
+    setIsKeyboardOpen(false);
+    const activeEl = document.activeElement as HTMLElement;
+    if (activeEl && ['INPUT', 'TEXTAREA'].includes(activeEl.tagName)) {
+      activeEl.blur();
+    }
+    try {
+      Keyboard.hide();
+    } catch (_) {}
+  }, []);
+
   // Back button handler
   const handleGoBack = () => {
+    if (isSearchFocused || searchQuery.trim().length > 0) {
+      handleCancelSearch();
+      return;
+    }
     if (activeSettingsModal) {
       setActiveSettingsModal(null);
       return;
@@ -292,6 +317,10 @@ export default function App() {
       return;
     }
     if (activeTab === 'scan') {
+      setActiveTab('home');
+      return;
+    }
+    if (activeTab === 'tools') {
       setActiveTab('home');
       return;
     }
@@ -1143,8 +1172,10 @@ export default function App() {
             files={files}
             recentFiles={recentFiles}
             searchQuery={searchQuery}
+            isSearchFocused={isSearchFocused}
             onSearchChange={handleSearchChange}
             onSearchFocusChange={setIsSearchFocused}
+            onCancelSearch={handleCancelSearch}
             onOpenSettings={handleOpenSettings}
             onOpenQRScanner={handleOpenQRScanner}
             onOpenCompressor={handleOpenCompressor}
@@ -1815,8 +1846,10 @@ interface HomeTabProps {
   files: DocFile[];
   recentFiles: DocFile[];
   searchQuery: string;
+  isSearchFocused?: boolean;
   onSearchChange: (query: string) => void;
   onSearchFocusChange?: (focused: boolean) => void;
+  onCancelSearch?: () => void;
   onOpenSettings: () => void;
   onOpenQRScanner: () => void;
   onOpenCompressor: () => void;
@@ -1836,8 +1869,10 @@ const HomeTab = React.memo(function HomeTab({
   files,
   recentFiles,
   searchQuery,
+  isSearchFocused,
   onSearchChange,
   onSearchFocusChange,
+  onCancelSearch,
   onOpenSettings,
   onOpenQRScanner,
   onOpenCompressor,
@@ -1876,45 +1911,64 @@ const HomeTab = React.memo(function HomeTab({
       </header>
 
       <div className="px-6 relative z-50">
-        <div className="relative group">
-          <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-neutral-400 group-focus-within:text-red-500 transition-colors" size={20} />
-          <input
-            type="text"
-            placeholder={t('searchPlaceholder')}
-            value={searchQuery}
-            onChange={(e) => onSearchChange(e.target.value)}
-            onFocus={() => onSearchFocusChange?.(true)}
-            onBlur={() => onSearchFocusChange?.(false)}
-            className="w-full bg-white border border-neutral-200/60 shadow-sm rounded-full py-4 pl-14 pr-12 text-sm font-medium focus:ring-4 focus:ring-red-500/10 focus:border-red-500 outline-none transition-all"
-          />
-          {searchQuery && (
+        <div className="flex items-center gap-3">
+          {(isSearchFocused || searchQuery.trim().length > 0) && (
             <button
               onClick={() => {
-                onSearchChange('');
-                onSearchFocusChange?.(false);
+                onCancelSearch?.();
               }}
-              className="absolute right-4 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-neutral-100 hover:bg-neutral-200 flex items-center justify-center text-neutral-500 transition-colors"
-              aria-label="Clear search"
+              className="w-12 h-12 rounded-full bg-white border border-neutral-200/60 shadow-sm flex items-center justify-center text-neutral-700 hover:bg-neutral-50 active:scale-95 transition-all shrink-0"
+              aria-label="Back"
             >
-              <X size={16} />
+              <ArrowLeft size={20} />
             </button>
           )}
-          {searchQuery && (
-            <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-neutral-200 shadow-xl rounded-2xl max-h-60 overflow-y-auto w-full z-50">
-              {searchResults.length > 0 ? (
-                searchResults.map(file => (
-                  <button
-                    key={file.id}
-                    onClick={() => {
-                      onFileClick(file);
-                      onSearchChange('');
-                    }}
-                    className="w-full text-left px-4 py-3 hover:bg-neutral-50 transition-colors border-b border-neutral-100 last:border-0 flex items-center gap-3"
-                  >
-                    <div className="w-10 h-10 bg-neutral-100 rounded-xl flex items-center justify-center shrink-0">
-                      <Files size={18} className="text-neutral-500" />
-                    </div>
-                    <div className="min-w-0">
+
+          <div className="relative group flex-1">
+            <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-neutral-400 group-focus-within:text-red-500 transition-colors" size={20} />
+            <input
+              type="text"
+              placeholder={t('searchPlaceholder')}
+              value={searchQuery}
+              onChange={(e) => onSearchChange(e.target.value)}
+              onFocus={() => onSearchFocusChange?.(true)}
+              onBlur={() => {
+                if (!searchQuery.trim()) {
+                  onSearchFocusChange?.(false);
+                }
+              }}
+              className="w-full bg-white border border-neutral-200/60 shadow-sm rounded-full py-4 pl-14 pr-12 text-sm font-medium focus:ring-4 focus:ring-red-500/10 focus:border-red-500 outline-none transition-all"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => {
+                  onCancelSearch?.();
+                }}
+                className="absolute right-4 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-neutral-100 hover:bg-neutral-200 flex items-center justify-center text-neutral-500 transition-colors"
+                aria-label="Clear search"
+              >
+                <X size={16} />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {searchQuery && (
+          <div className="absolute top-full left-6 right-6 mt-2 bg-white border border-neutral-200 shadow-xl rounded-2xl max-h-60 overflow-y-auto z-50">
+            {searchResults.length > 0 ? (
+              searchResults.map(file => (
+                <button
+                  key={file.id}
+                  onClick={() => {
+                    onFileClick(file);
+                    onCancelSearch?.();
+                  }}
+                  className="w-full text-left px-4 py-3 hover:bg-neutral-50 transition-colors border-b border-neutral-100 last:border-0 flex items-center gap-3"
+                >
+                  <div className="w-10 h-10 bg-neutral-100 rounded-xl flex items-center justify-center shrink-0">
+                    <Files size={18} className="text-neutral-500" />
+                  </div>
+                  <div className="min-w-0">
                       <p className="font-semibold text-neutral-900 truncate text-sm">{file.name}</p>
                       <p className="text-xs text-neutral-500 truncate">{formatFileSize(file.size)}</p>
                     </div>
@@ -1928,7 +1982,6 @@ const HomeTab = React.memo(function HomeTab({
             </div>
           )}
         </div>
-      </div>
 
       <div className="grid grid-cols-4 gap-4 px-6">
         <button
