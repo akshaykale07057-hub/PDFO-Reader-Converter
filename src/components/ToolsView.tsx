@@ -1,5 +1,5 @@
-import React, { useMemo } from 'react';
-import { FileText, Image as ImageIcon, FileArchive, Copy, Scissors, Lock } from 'lucide-react';
+import React from 'react';
+import { FileText, Image as ImageIcon, FileArchive, Copy, Scissors, Lock, ArrowLeft } from 'lucide-react';
 import { cn } from '../utils/cn';
 import { getTranslator } from '../utils/translator';
 
@@ -7,10 +7,9 @@ interface ToolsViewProps {
   onBack?: () => void;
   onSelectAction?: (action: string) => void;
   language?: string;
-  adBannerHeight?: number;
 }
 
-export const ToolsView = React.memo(function ToolsView({ onBack, onSelectAction, language = 'English US', adBannerHeight = 0 }: ToolsViewProps) {
+export const ToolsView = React.memo(function ToolsView({ onBack, onSelectAction, language = 'English US' }: ToolsViewProps) {
   const t = getTranslator(language);
 
   const tools = [
@@ -30,22 +29,22 @@ export const ToolsView = React.memo(function ToolsView({ onBack, onSelectAction,
     }
   };
 
-  // Dynamic bottom clearance so the last tools ("PDF to Word" & "Protect PDF")
-  // are completely visible, never blocked by the bottom navigation bar ("home strip")
-  // or by the AdMob banner when it elevates the navigation bar.
-  const dynamicPaddingBottom = useMemo(() => {
-    const clearance = adBannerHeight > 0 ? (adBannerHeight + 180) : 160;
-    return `${clearance}px`;
-  }, [adBannerHeight]);
-
   return (
-    <div 
-      className="pt-14 px-6 space-y-6"
-      style={{ paddingBottom: dynamicPaddingBottom }}
-    >
-      <header className="mb-8 font-sans">
-        <h1 className="text-3xl font-display font-bold tracking-tight text-neutral-900">{t('tools')}</h1>
-        <p className="text-neutral-500 mt-2 font-medium">{t('extraFeatures')}</p>
+    <div className="pt-10 pb-12 px-6 space-y-6">
+      <header className="mb-6 font-sans flex items-center gap-4">
+        {onBack && (
+          <button
+            onClick={onBack}
+            className="w-11 h-11 rounded-full bg-white border border-neutral-200/60 shadow-sm flex items-center justify-center text-neutral-700 hover:bg-neutral-50 active:scale-95 transition-all"
+            aria-label="Back"
+          >
+            <ArrowLeft size={22} />
+          </button>
+        )}
+        <div>
+          <h1 className="text-3xl font-display font-bold tracking-tight text-neutral-900">{t('tools')}</h1>
+          <p className="text-neutral-500 mt-0.5 font-medium text-sm">{t('extraFeatures')}</p>
+        </div>
       </header>
 
       <div className="grid grid-cols-2 gap-4">

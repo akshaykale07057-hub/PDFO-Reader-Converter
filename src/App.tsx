@@ -1127,7 +1127,6 @@ export default function App() {
             onDownloadFile={handleDownloadFile}
             language={selectedLanguage}
             onRefresh={handleRefresh}
-            adBannerHeight={adBannerHeight}
           />
         </div>
 
@@ -1160,7 +1159,6 @@ export default function App() {
             onTouchStart={handleFilesTouchStart}
             onTouchMove={handleFilesTouchMove}
             onTouchEnd={handleFilesTouchEnd}
-            adBannerHeight={adBannerHeight}
           />
         </div>
 
@@ -1188,7 +1186,6 @@ export default function App() {
             onDownloadFile={handleDownloadFile}
             language={selectedLanguage}
             onRefresh={handleRefresh}
-            adBannerHeight={adBannerHeight}
           />
         </div>
 
@@ -1203,10 +1200,10 @@ export default function App() {
           )}
           style={{ WebkitOverflowScrolling: 'touch', transform: 'translateZ(0)' }}
         >
-          <ToolsView 
-            language={selectedLanguage} 
-            onSelectAction={handleToolActionSelect} 
-            adBannerHeight={adBannerHeight}
+          <ToolsView
+            language={selectedLanguage}
+            onSelectAction={handleToolActionSelect}
+            onBack={() => setActiveTab('home')}
           />
         </div>
       </main>
@@ -1230,8 +1227,8 @@ export default function App() {
         </div>
       )}
 
-      {/* Bottom Navigation (shifted dynamically when AdMob banner is active) - Hidden when in camera/scan view or keyboard is open */}
-      {activeTab !== 'scan' && !isKeyboardOpen && (
+      {/* Bottom Navigation (shifted dynamically when AdMob banner is active) - Hidden when in tools, camera/scan view, active tools, or keyboard is open */}
+      {activeTab !== 'scan' && activeTab !== 'tools' && !activeToolAction && !showCompressor && !showMerge && !showSplit && !isKeyboardOpen && (
         <div 
           className="fixed left-1/2 -translate-x-1/2 w-[calc(100%-3rem)] max-w-[380px] z-40 transition-all duration-300 ease-out"
           style={{ bottom: adBannerHeight > 0 ? `${adBannerHeight + 16}px` : '1.5rem' }}
@@ -1356,7 +1353,6 @@ export default function App() {
               exit={{ y: '100%' }}
               transition={{ type: 'spring', damping: 25, stiffness: 200 }}
               className="fixed inset-0 bg-[#FAFAFA] z-50 flex flex-col"
-              style={{ paddingBottom: adBannerHeight > 0 ? `${adBannerHeight}px` : '0px' }}
             >
               <div className="p-4 flex justify-between items-center border-b border-neutral-200/60 bg-white shadow-sm">
                 <button onClick={() => { setShowCompressor(false); loadFiles(); }} className="p-2 hover:bg-neutral-100 rounded-full transition-colors">
@@ -1383,7 +1379,6 @@ export default function App() {
               exit={{ y: '100%' }}
               transition={{ type: 'spring', damping: 25, stiffness: 200 }}
               className="fixed inset-0 bg-[#FAFAFA] z-50 flex flex-col"
-              style={{ paddingBottom: adBannerHeight > 0 ? `${adBannerHeight}px` : '0px' }}
             >
               <div className="p-4 flex justify-between items-center border-b border-neutral-200/60 bg-white shadow-sm">
                 <button onClick={() => { setShowMerge(false); loadFiles(); }} className="p-2 hover:bg-neutral-100 rounded-full transition-colors">
@@ -1410,7 +1405,6 @@ export default function App() {
               exit={{ y: '100%' }}
               transition={{ type: 'spring', damping: 25, stiffness: 200 }}
               className="fixed inset-0 bg-[#FAFAFA] z-50 flex flex-col"
-              style={{ paddingBottom: adBannerHeight > 0 ? `${adBannerHeight}px` : '0px' }}
             >
               <div className="p-4 flex justify-between items-center border-b border-neutral-200/60 bg-white shadow-sm">
                 <button onClick={() => { setShowSplit(false); loadFiles(); }} className="p-2 hover:bg-neutral-100 rounded-full transition-colors">
@@ -1434,7 +1428,6 @@ export default function App() {
             <GenericToolFeature
               toolId={activeToolAction}
               language={selectedLanguage}
-              adBannerHeight={adBannerHeight}
               onClose={() => {
                 setActiveToolAction(null);
                 loadFiles();
@@ -1805,7 +1798,6 @@ interface HomeTabProps {
   onDownloadFile: (file: DocFile) => void;
   language: string;
   onRefresh: () => void;
-  adBannerHeight?: number;
 }
 
 const HomeTab = React.memo(function HomeTab({
@@ -1825,8 +1817,7 @@ const HomeTab = React.memo(function HomeTab({
   onShareFiles,
   onDownloadFile,
   language,
-  onRefresh,
-  adBannerHeight = 0
+  onRefresh
 }: HomeTabProps) {
   const t = getTranslator(language);
   const searchResults = useMemo(() => {
@@ -1836,10 +1827,7 @@ const HomeTab = React.memo(function HomeTab({
   }, [files, searchQuery]);
 
   return (
-    <div 
-      className="space-y-8 pt-10"
-      style={{ paddingBottom: adBannerHeight > 0 ? `${adBannerHeight + 180}px` : '10rem' }}
-    >
+    <div className="space-y-8 pb-32 pt-10">
       <header className="flex justify-between items-center px-6">
         <div>
           <h1 className="text-3xl font-display font-bold text-neutral-900 tracking-tight">{t('pdfReader')}</h1>
@@ -1968,7 +1956,6 @@ interface FilesTabProps {
   onTouchStart?: (e: React.TouchEvent) => void;
   onTouchMove?: (e: React.TouchEvent) => void;
   onTouchEnd?: () => void;
-  adBannerHeight?: number;
 }
 
 const FilesTab = React.memo(function FilesTab({
@@ -1985,15 +1972,13 @@ const FilesTab = React.memo(function FilesTab({
   onRefresh,
   onTouchStart,
   onTouchMove,
-  onTouchEnd,
-  adBannerHeight = 0
+  onTouchEnd
 }: FilesTabProps) {
   const t = getTranslator(language);
 
   return (
     <div 
-      className="space-y-6 pt-10"
-      style={{ paddingBottom: adBannerHeight > 0 ? `${adBannerHeight + 180}px` : '10rem' }}
+      className="space-y-6 pb-32 pt-10"
       onTouchStart={onTouchStart}
       onTouchMove={onTouchMove}
       onTouchEnd={onTouchEnd}
@@ -2042,7 +2027,6 @@ interface RecentTabProps {
   onDownloadFile: (file: DocFile) => void;
   language: string;
   onRefresh: () => void;
-  adBannerHeight?: number;
 }
 
 const RecentTab = React.memo(function RecentTab({
@@ -2054,16 +2038,12 @@ const RecentTab = React.memo(function RecentTab({
   onShareFiles,
   onDownloadFile,
   language,
-  onRefresh,
-  adBannerHeight = 0
+  onRefresh
 }: RecentTabProps) {
   const t = getTranslator(language);
 
   return (
-    <div 
-      className="space-y-6 pt-10"
-      style={{ paddingBottom: adBannerHeight > 0 ? `${adBannerHeight + 180}px` : '10rem' }}
-    >
+    <div className="space-y-6 pb-32 pt-10">
       <h2 className="text-3xl font-display font-bold px-6 tracking-tight">{t('recentlyOpened')}</h2>
       <FileList
         files={files}
