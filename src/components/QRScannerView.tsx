@@ -8,13 +8,16 @@ import {
   Check, 
   CheckCircle2, 
   Wifi, 
-  Plus 
+  Plus,
+  ZoomIn,
+  ZoomOut
 } from 'lucide-react';
-import { motion } from 'motion/react';
+import { motion, AnimatePresence } from 'motion/react';
 import jsQR from 'jsqr';
 import { Camera as CapacitorCamera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { Capacitor } from '@capacitor/core';
 import { AppLauncher } from '@capacitor/app-launcher';
+import { cn } from '../utils/cn';
 
 interface QRScannerViewProps {
   onClose: () => void;
@@ -328,6 +331,88 @@ export const QRScannerView: React.FC<QRScannerViewProps> = ({ onClose, language 
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('environment');
   const [isSearchingImage, setIsSearchingImage] = useState(false);
   const [hasScannedSuccess, setHasScannedSuccess] = useState(false);
+  const [detectedFormat, setDetectedFormat] = useState<string>('QR Code');
+
+  // Zoom states for distant barcode / QR code scanning
+  const [zoomLevel, setZoomLevel] = useState<number>(1);
+  const zoomRef = useRef<number>(1);
+  const initialPinchDist = useRef<number | null>(null);
+  const initialPinchZoom = useRef<number>(1);
+  const [showZoomIndicator, setShowZoomIndicator] = useState(false);
+  const zoomTimeoutRef = useRef<any>(null);
+  const isProcessingFrameRef = useRef(false);
+  const barcodeDetectorRef = useRef<any>(null);
+
+  // Initialize BarcodeDetector once on mount if supported
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'BarcodeDetector' in window) {
+      try {
+        barcodeDetectorRef.current = new (window as any).BarcodeDetector({
+          formats: [
+            'qr_code', 'ean_13', 'ean_8', 'code_128', 'code_39', 'code_93',
+            'upc_a', 'upc_e', 'itf', 'data_matrix', 'aztec', 'pdf417', 'codabar'
+          ]
+        });
+      } catch (err) {
+        console.warn('Native BarcodeDetector not available, using jsQR fallback:', err);
+      }
+    }
+  }, []);
+
+  const applyZoom = useCallback((newZoom: number) => {
+    const clamped = Math.min(Math.max(Number(newZoom.toFixed(1)), 1), 5);
+    setZoomLevel(clamped);
+    zoomRef.current = clamped;
+    setShowZoomIndicator(true);
+    if (zoomTimeoutRef.current) clearTimeout(zoomTimeoutRef.current);
+    zoomTimeoutRef.current = setTimeout(() => setShowZoomIndicator(false), 1600);
+
+    // Apply hardware camera zoom if supported by Android/browser
+    if (streamRef.current) {
+      const track = streamRef.current.getVideoTracks()[0];
+      if (track) {
+        try {
+          const capabilities = (track.getCapabilities ? track.getCapabilities() : {}) as any;
+          if (capabilities.zoom) {
+            const minZ = capabilities.zoom.min || 1;
+            const maxZ = capabilities.zoom.max || 5;
+            const targetZ = Math.min(Math.max(clamped, minZ), maxZ);
+            track.applyConstraints({
+              advanced: [{ zoom: targetZ }]
+            } as any).catch(() => {});
+          }
+        } catch (_) {}
+      }
+    }
+  }, []);
+
+  // Two-finger pinch to zoom handlers
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (e.touches.length === 2) {
+      const dist = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      );
+      initialPinchDist.current = dist;
+      initialPinchZoom.current = zoomRef.current;
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (e.touches.length === 2 && initialPinchDist.current !== null && initialPinchDist.current > 0) {
+      const dist = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      );
+      const ratio = dist / initialPinchDist.current;
+      const targetZoom = initialPinchZoom.current * ratio;
+      applyZoom(targetZoom);
+    }
+  };
+
+  const handleTouchEnd = () => {
+    initialPinchDist.current = null;
+  };
 
   // Ref assignments
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -336,6 +421,32 @@ export const QRScannerView: React.FC<QRScannerViewProps> = ({ onClose, language 
   const scanLoopRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const scanFullFrameRef = useRef(false);
+
+  // Universal barcode/QR decode from canvas
+  const decodeFromCanvas = async (canvas: HTMLCanvasElement): Promise<{ data: string; format: string } | null> => {
+    // 1. Try native BarcodeDetector first (supports 1D product barcodes + 2D QR codes)
+    if (barcodeDetectorRef.current) {
+      try {
+        const barcodes = await barcodeDetectorRef.current.detect(canvas);
+        if (barcodes && barcodes.length > 0 && barcodes[0].rawValue) {
+          return { data: barcodes[0].rawValue, format: barcodes[0].format || 'Barcode' };
+        }
+      } catch (_) {}
+    }
+
+    // 2. Fallback to jsQR for universal QR detection
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const code = jsQR(imageData.data, imageData.width, imageData.height, {
+        inversionAttempts: 'attemptBoth'
+      });
+      if (code && code.data) {
+        return { data: code.data, format: 'QR Code' };
+      }
+    }
+    return null;
+  };
 
 
   const stopCamera = useCallback(() => {
@@ -359,6 +470,8 @@ export const QRScannerView: React.FC<QRScannerViewProps> = ({ onClose, language 
     setCameraError(null);
     setScanResult(null);
     setHasScannedSuccess(false);
+    setZoomLevel(1);
+    zoomRef.current = 1;
 
     try {
       if (Capacitor.isNativePlatform()) {
@@ -443,7 +556,7 @@ export const QRScannerView: React.FC<QRScannerViewProps> = ({ onClose, language 
     setIsSearchingImage(true);
     setCameraError(null);
     const img = new Image();
-    img.onload = () => {
+    img.onload = async () => {
       const offscreenCanvas = document.createElement('canvas');
       const ctx = offscreenCanvas.getContext('2d');
       if (!ctx) {
@@ -455,14 +568,12 @@ export const QRScannerView: React.FC<QRScannerViewProps> = ({ onClose, language 
       offscreenCanvas.height = img.height;
       ctx.drawImage(img, 0, 0, img.width, img.height);
 
-      const imageData = ctx.getImageData(0, 0, img.width, img.height);
-      const code = jsQR(imageData.data, imageData.width, imageData.height);
-
+      const result = await decodeFromCanvas(offscreenCanvas);
       setIsSearchingImage(false);
-      if (code) {
-        handleQRCodeDecoded(code.data);
+      if (result) {
+        handleQRCodeDecoded(result.data, result.format);
       } else {
-        alert('No valid QR code detected in this photo. Please get closer and make sure the QR code is clear and in focus.');
+        alert('No valid barcode or QR code detected in this photo. Please make sure the barcode is clear and in focus.');
       }
     };
     img.onerror = () => {
@@ -500,7 +611,7 @@ export const QRScannerView: React.FC<QRScannerViewProps> = ({ onClose, language 
     const reader = new FileReader();
     reader.onload = (event) => {
       const img = new Image();
-      img.onload = () => {
+      img.onload = async () => {
         const offscreenCanvas = document.createElement('canvas');
         const ctx = offscreenCanvas.getContext('2d');
         if (!ctx) {
@@ -513,14 +624,12 @@ export const QRScannerView: React.FC<QRScannerViewProps> = ({ onClose, language 
         offscreenCanvas.height = img.height;
         ctx.drawImage(img, 0, 0, img.width, img.height);
 
-        const imageData = ctx.getImageData(0, 0, img.width, img.height);
-        const code = jsQR(imageData.data, imageData.width, imageData.height);
-
+        const result = await decodeFromCanvas(offscreenCanvas);
         setIsSearchingImage(false);
-        if (code) {
-          handleQRCodeDecoded(code.data);
+        if (result) {
+          handleQRCodeDecoded(result.data, result.format);
         } else {
-          alert('No valid QR code detected in this image. Please ensure the QR code is clearly visible and centered.');
+          alert('No valid barcode or QR code detected in this image. Please ensure the code is clearly visible and centered.');
         }
       };
       img.src = event.target?.result as string;
@@ -529,13 +638,14 @@ export const QRScannerView: React.FC<QRScannerViewProps> = ({ onClose, language 
     e.target.value = ''; // Reset input
   };
 
-  const handleQRCodeDecoded = (data: string) => {
+  const handleQRCodeDecoded = (data: string, format: string = 'QR Code') => {
     // Immediate vibration/feedback
     if (navigator.vibrate) {
-      navigator.vibrate(100);
+      try { navigator.vibrate(100); } catch (_) {}
     }
     
     setScanResult(data);
+    setDetectedFormat(format.replace(/_/g, ' ').toUpperCase());
     setHasScannedSuccess(true);
 
     const trimmed = data.trim();
@@ -551,11 +661,11 @@ export const QRScannerView: React.FC<QRScannerViewProps> = ({ onClose, language 
     }
   };
 
-  // Live Canvas Tick Process
+  // Live Canvas Tick Process (with digital & hardware zoom center cropping)
   useEffect(() => {
     if (!isCameraActive || hasScannedSuccess) return;
 
-    const tick = () => {
+    const tick = async () => {
       if (!videoRef.current || !canvasRef.current) {
         scanLoopRef.current = requestAnimationFrame(tick);
         return;
@@ -563,32 +673,34 @@ export const QRScannerView: React.FC<QRScannerViewProps> = ({ onClose, language 
 
       const video = videoRef.current;
       const canvas = canvasRef.current;
-      const ctx = canvas.getContext('2d');
 
-      if (video.readyState === video.HAVE_ENOUGH_DATA && ctx) {
-        const scanFullFrame = scanFullFrameRef.current;
-        scanFullFrameRef.current = !scanFullFrame;
+      if (video.readyState === video.HAVE_ENOUGH_DATA && !isProcessingFrameRef.current) {
+        isProcessingFrameRef.current = true;
 
-        if (scanFullFrame) {
-          canvas.width = video.videoWidth;
-          canvas.height = video.videoHeight;
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        } else {
-          // Cropped center box scan for high resolution and accuracy
-          const scanSize = Math.floor(Math.min(video.videoWidth, video.videoHeight) * 0.7);
-          const sx = Math.floor((video.videoWidth - scanSize) / 2);
-          const sy = Math.floor((video.videoHeight - scanSize) / 2);
-          canvas.width = scanSize;
-          canvas.height = scanSize;
-          ctx.drawImage(video, sx, sy, scanSize, scanSize, 0, 0, scanSize, scanSize);
-        }
+        try {
+          const currentZoom = zoomRef.current;
+          // Crop the center region based on currentZoom
+          const cropW = video.videoWidth / currentZoom;
+          const cropH = video.videoHeight / currentZoom;
+          const sx = (video.videoWidth - cropW) / 2;
+          const sy = (video.videoHeight - cropH) / 2;
 
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const code = jsQR(imageData.data, imageData.width, imageData.height);
+          const targetSize = Math.floor(Math.min(Math.max(cropW, cropH), 800));
+          canvas.width = targetSize;
+          canvas.height = targetSize;
 
-        if (code && code.data) {
-          handleQRCodeDecoded(code.data);
-          return; // Escape animation loop
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(video, sx, sy, cropW, cropH, 0, 0, targetSize, targetSize);
+            const result = await decodeFromCanvas(canvas);
+            if (result) {
+              handleQRCodeDecoded(result.data, result.format);
+              return; // Stop animation loop
+            }
+          }
+        } catch (_) {
+        } finally {
+          isProcessingFrameRef.current = false;
         }
       }
       scanLoopRef.current = requestAnimationFrame(tick);
@@ -627,18 +739,39 @@ export const QRScannerView: React.FC<QRScannerViewProps> = ({ onClose, language 
       <div className="flex-1 overflow-y-auto no-scrollbar p-6 space-y-6 pb-24">
         {!scanResult ? (
           <div className="space-y-6">
-            <div className="relative aspect-square w-full max-w-[340px] mx-auto rounded-[32px] overflow-hidden bg-black border-4 border-white shadow-2xl flex flex-col justify-between">
+            <div 
+              className="relative aspect-square w-full max-w-[340px] mx-auto rounded-[32px] overflow-hidden bg-black border-4 border-white shadow-2xl flex flex-col justify-between touch-none select-none"
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+            >
               <canvas ref={canvasRef} className="hidden" />
               
               <video 
                 ref={videoRef} 
-                className={`w-full h-full object-cover ${isCameraActive ? "" : "hidden"}`}
+                className={`w-full h-full object-cover transition-transform duration-75 ease-out ${isCameraActive ? "" : "hidden"}`}
+                style={{ transform: `scale(${zoomLevel})`, transformOrigin: 'center center' }}
                 playsInline
                 muted
               />
 
               {isCameraActive ? (
                 <div className="absolute inset-0 pointer-events-none">
+                  {/* Floating Zoom Indicator */}
+                  <AnimatePresence>
+                    {(showZoomIndicator || zoomLevel > 1) && (
+                      <motion.div
+                        initial={{ opacity: 0, scale: 0.8 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.8 }}
+                        className="absolute top-4 left-1/2 -translate-x-1/2 bg-black/75 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-white/20 text-xs font-bold text-white shadow-lg flex items-center gap-1.5 pointer-events-none z-20"
+                      >
+                        <ZoomIn size={14} className="text-amber-400" />
+                        <span>{zoomLevel.toFixed(1)}x</span>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
                   {/* Laser scanning strip */}
                   <motion.div 
                     className="absolute inset-x-4 h-1 bg-blue-500/80 shadow-[0_0_12px_rgba(59,130,246,0.8)]" 
@@ -699,6 +832,32 @@ export const QRScannerView: React.FC<QRScannerViewProps> = ({ onClose, language 
               )}
             </div>
 
+            {/* Quick Zoom Buttons & Gesture Hint for Distant Barcodes */}
+            {isCameraActive && (
+              <div className="flex flex-col items-center gap-2">
+                <div className="flex items-center justify-center gap-2 bg-white border border-neutral-200/80 rounded-full px-3 py-1.5 shadow-sm">
+                  {[1, 2, 3, 5].map((lvl) => (
+                    <button
+                      key={lvl}
+                      type="button"
+                      onClick={() => applyZoom(lvl)}
+                      className={cn(
+                        "w-9 h-9 rounded-full font-bold text-xs transition-all active:scale-95 flex items-center justify-center cursor-pointer",
+                        Math.round(zoomLevel) === lvl
+                          ? "bg-neutral-900 text-white shadow-sm"
+                          : "text-neutral-600 hover:bg-neutral-100"
+                      )}
+                    >
+                      {lvl}x
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[11px] font-medium text-neutral-400">
+                  Pinch with two fingers or tap buttons to zoom on distant barcodes
+                </p>
+              </div>
+            )}
+
             {/* Upload Section Option */}
             <div className="border border-neutral-200 border-dashed rounded-[32px] bg-white p-6 text-center space-y-4 shadow-sm">
               <div className="w-14 h-14 rounded-2xl bg-neutral-50 flex items-center justify-center text-neutral-400 mx-auto">
@@ -737,7 +896,7 @@ export const QRScannerView: React.FC<QRScannerViewProps> = ({ onClose, language 
               </div>
               <div>
                 <h3 className="font-display font-bold text-lg text-neutral-900 leading-tight">{t('decodedSuccessfully')}</h3>
-                <p className="text-xs text-neutral-400 font-medium tracking-wide uppercase mt-0.5">{t('format')}: QR Code ({scanType})</p>
+                <p className="text-xs text-neutral-400 font-medium tracking-wide uppercase mt-0.5">{t('format')}: {detectedFormat} ({scanType})</p>
               </div>
             </div>
 
