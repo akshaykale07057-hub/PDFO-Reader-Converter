@@ -1084,7 +1084,7 @@ export default function App() {
 
       <main
         ref={mainRef}
-        className="h-screen w-full relative overflow-hidden"
+        className="h-[100dvh] min-h-[100dvh] w-full relative overflow-hidden"
       >
         <input
           id="device-scanner"
