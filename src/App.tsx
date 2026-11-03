@@ -143,12 +143,8 @@ export default function App() {
 
     const checkKeyboard = () => {
       const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-      const isInputFocused = Boolean(
-        document.activeElement && 
-        (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName) || (document.activeElement as HTMLElement).isContentEditable)
-      );
-      const isHeightShrunk = (initialHeight - vh) > 100 || (window.screen.height - vh) > 200;
-      setIsKeyboardOpen(isInputFocused || isHeightShrunk);
+      const isHeightShrunk = (initialHeight - vh) > 120 || (window.screen.height - vh) > 220;
+      setIsKeyboardOpen(isHeightShrunk);
     };
 
     const handleFocusIn = (e: FocusEvent) => {
@@ -160,14 +156,12 @@ export default function App() {
 
     const handleFocusOut = () => {
       setTimeout(() => {
-        const active = document.activeElement as HTMLElement;
-        if (!active || (!['INPUT', 'TEXTAREA'].includes(active.tagName) && !active.isContentEditable)) {
-          const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-          if ((initialHeight - vh) <= 100) {
-            setIsKeyboardOpen(false);
-          }
+        const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+        const isHeightShrunk = (initialHeight - vh) > 120 || (window.screen.height - vh) > 220;
+        if (!isHeightShrunk) {
+          setIsKeyboardOpen(false);
         }
-      }, 150);
+      }, 50);
     };
 
     window.visualViewport?.addEventListener('resize', checkKeyboard);
@@ -1289,8 +1283,8 @@ export default function App() {
         </div>
       )}
 
-      {/* Bottom Navigation (shifted dynamically when AdMob banner is active) - Hidden when in tools, camera/scan view, active tools, search active, or keyboard is open */}
-      {activeTab !== 'scan' && activeTab !== 'tools' && !activeToolAction && !showCompressor && !showMerge && !showSplit && !isKeyboardOpen && !isSearchFocused && !searchQuery.trim() && (
+      {/* Bottom Navigation (shifted dynamically when AdMob banner is active) - Hidden when in tools, camera/scan view, active tools, or keyboard is open */}
+      {activeTab !== 'scan' && activeTab !== 'tools' && !activeToolAction && !showCompressor && !showMerge && !showSplit && !isKeyboardOpen && (
         <div 
           className="fixed left-1/2 -translate-x-1/2 w-[calc(100%-3rem)] max-w-[380px] z-40 transition-all duration-300 ease-out"
           style={{ bottom: adBannerHeight > 0 ? `${adBannerHeight + 16}px` : '1.5rem' }}
