@@ -133,33 +133,63 @@ export default function App() {
 
   // Keyboard visibility detection to prevent bottom nav bar from covering search inputs
   const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
+  const [isSearchFocused, setIsSearchFocused] = useState(false);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
-    const handleResize = () => {
+    const initialHeight = window.innerHeight;
+
+    const checkKeyboard = () => {
       const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-      const kbOpen = (window.innerHeight - vh) > 120;
-      setIsKeyboardOpen(kbOpen);
+      const isInputFocused = Boolean(
+        document.activeElement && 
+        (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName) || (document.activeElement as HTMLElement).isContentEditable)
+      );
+      const isHeightShrunk = (initialHeight - vh) > 100 || (window.screen.height - vh) > 200;
+      setIsKeyboardOpen(isInputFocused || isHeightShrunk);
     };
 
-    window.visualViewport?.addEventListener('resize', handleResize);
-    window.visualViewport?.addEventListener('scroll', handleResize);
-    window.addEventListener('resize', handleResize);
+    const handleFocusIn = (e: FocusEvent) => {
+      const target = e.target as HTMLElement;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        setIsKeyboardOpen(true);
+      }
+    };
 
-    let showSub: any;
-    let hideSub: any;
+    const handleFocusOut = () => {
+      setTimeout(() => {
+        const active = document.activeElement as HTMLElement;
+        if (!active || (!['INPUT', 'TEXTAREA'].includes(active.tagName) && !active.isContentEditable)) {
+          const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+          if ((initialHeight - vh) <= 100) {
+            setIsKeyboardOpen(false);
+          }
+        }
+      }, 150);
+    };
+
+    window.visualViewport?.addEventListener('resize', checkKeyboard);
+    window.visualViewport?.addEventListener('scroll', checkKeyboard);
+    window.addEventListener('resize', checkKeyboard);
+    window.addEventListener('focusin', handleFocusIn);
+    window.addEventListener('focusout', handleFocusOut);
+
+    let subs: any[] = [];
     try {
-      showSub = Keyboard.addListener('keyboardWillShow', () => setIsKeyboardOpen(true));
-      hideSub = Keyboard.addListener('keyboardWillHide', () => setIsKeyboardOpen(false));
+      subs.push(Keyboard.addListener('keyboardWillShow', () => setIsKeyboardOpen(true)));
+      subs.push(Keyboard.addListener('keyboardDidShow', () => setIsKeyboardOpen(true)));
+      subs.push(Keyboard.addListener('keyboardWillHide', () => setIsKeyboardOpen(false)));
+      subs.push(Keyboard.addListener('keyboardDidHide', () => setIsKeyboardOpen(false)));
     } catch (_) {}
 
     return () => {
-      window.visualViewport?.removeEventListener('resize', handleResize);
-      window.visualViewport?.removeEventListener('scroll', handleResize);
-      window.removeEventListener('resize', handleResize);
-      showSub?.remove?.();
-      hideSub?.remove?.();
+      window.visualViewport?.removeEventListener('resize', checkKeyboard);
+      window.visualViewport?.removeEventListener('scroll', checkKeyboard);
+      window.removeEventListener('resize', checkKeyboard);
+      window.removeEventListener('focusin', handleFocusIn);
+      window.removeEventListener('focusout', handleFocusOut);
+      subs.forEach(s => s?.remove?.());
     };
   }, []);
 
@@ -1114,6 +1144,7 @@ export default function App() {
             recentFiles={recentFiles}
             searchQuery={searchQuery}
             onSearchChange={handleSearchChange}
+            onSearchFocusChange={setIsSearchFocused}
             onOpenSettings={handleOpenSettings}
             onOpenQRScanner={handleOpenQRScanner}
             onOpenCompressor={handleOpenCompressor}
@@ -1227,8 +1258,8 @@ export default function App() {
         </div>
       )}
 
-      {/* Bottom Navigation (shifted dynamically when AdMob banner is active) - Hidden when in tools, camera/scan view, active tools, or keyboard is open */}
-      {activeTab !== 'scan' && activeTab !== 'tools' && !activeToolAction && !showCompressor && !showMerge && !showSplit && !isKeyboardOpen && (
+      {/* Bottom Navigation (shifted dynamically when AdMob banner is active) - Hidden when in tools, camera/scan view, active tools, search active, or keyboard is open */}
+      {activeTab !== 'scan' && activeTab !== 'tools' && !activeToolAction && !showCompressor && !showMerge && !showSplit && !isKeyboardOpen && !isSearchFocused && !searchQuery.trim() && (
         <div 
           className="fixed left-1/2 -translate-x-1/2 w-[calc(100%-3rem)] max-w-[380px] z-40 transition-all duration-300 ease-out"
           style={{ bottom: adBannerHeight > 0 ? `${adBannerHeight + 16}px` : '1.5rem' }}
@@ -1785,6 +1816,7 @@ interface HomeTabProps {
   recentFiles: DocFile[];
   searchQuery: string;
   onSearchChange: (query: string) => void;
+  onSearchFocusChange?: (focused: boolean) => void;
   onOpenSettings: () => void;
   onOpenQRScanner: () => void;
   onOpenCompressor: () => void;
@@ -1805,6 +1837,7 @@ const HomeTab = React.memo(function HomeTab({
   recentFiles,
   searchQuery,
   onSearchChange,
+  onSearchFocusChange,
   onOpenSettings,
   onOpenQRScanner,
   onOpenCompressor,
@@ -1850,8 +1883,22 @@ const HomeTab = React.memo(function HomeTab({
             placeholder={t('searchPlaceholder')}
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
-            className="w-full bg-white border border-neutral-200/60 shadow-sm rounded-full py-4 pl-14 pr-6 text-sm font-medium focus:ring-4 focus:ring-red-500/10 focus:border-red-500 outline-none transition-all"
+            onFocus={() => onSearchFocusChange?.(true)}
+            onBlur={() => onSearchFocusChange?.(false)}
+            className="w-full bg-white border border-neutral-200/60 shadow-sm rounded-full py-4 pl-14 pr-12 text-sm font-medium focus:ring-4 focus:ring-red-500/10 focus:border-red-500 outline-none transition-all"
           />
+          {searchQuery && (
+            <button
+              onClick={() => {
+                onSearchChange('');
+                onSearchFocusChange?.(false);
+              }}
+              className="absolute right-4 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-neutral-100 hover:bg-neutral-200 flex items-center justify-center text-neutral-500 transition-colors"
+              aria-label="Clear search"
+            >
+              <X size={16} />
+            </button>
+          )}
           {searchQuery && (
             <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-neutral-200 shadow-xl rounded-2xl max-h-60 overflow-y-auto w-full z-50">
               {searchResults.length > 0 ? (
