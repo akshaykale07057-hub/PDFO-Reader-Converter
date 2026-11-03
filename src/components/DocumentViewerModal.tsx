@@ -1078,7 +1078,12 @@ const PdfPageRenderer: React.FC<{
 };
 
 // Word DOCX display
-const WordDocxViewer: React.FC<{ arrayBuffer: ArrayBuffer; htmlContent: string | null }> = ({ arrayBuffer, htmlContent }) => {
+const WordDocxViewer: React.FC<{ 
+  arrayBuffer: ArrayBuffer; 
+  htmlContent: string | null;
+  onSwitchToHighFidelity?: () => void;
+  isConverting?: boolean;
+}> = ({ arrayBuffer, htmlContent, onSwitchToHighFidelity, isConverting }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const parentRef = useRef<HTMLDivElement>(null);
   const [rendered, setRendered] = useState(false);
@@ -1380,22 +1385,10 @@ const WordDocxViewer: React.FC<{ arrayBuffer: ArrayBuffer; htmlContent: string |
                 const parent = container.querySelector('.docx-wrapper') || container;
                 const sections = parent.querySelectorAll('section');
                 
-                let needsPartitioning = false;
-                sections.forEach((s) => {
-                  const sSect = s as HTMLElement;
-                  if (sSect && (sSect.scrollHeight > 1300 || sSect.offsetHeight > 1300)) {
-                    needsPartitioning = true;
-                  }
-                });
-
-                if (needsPartitioning) {
-                  partitionLongSections(container);
+                if (sections.length > 0) {
+                  setPageCount(sections.length);
                 } else {
-                  if (sections.length > 0) {
-                    setPageCount(sections.length);
-                  } else {
-                    setPageCount(1);
-                  }
+                  setPageCount(1);
                 }
                 setRendered(true);
               }
@@ -1609,6 +1602,30 @@ const WordDocxViewer: React.FC<{ arrayBuffer: ArrayBuffer; htmlContent: string |
         <div className="flex flex-col items-center justify-center p-12 text-neutral-400 bg-white border border-neutral-200 rounded-2xl shadow-sm mx-2 sm:mx-0">
           <Loader2 className="animate-spin text-blue-600 mb-3" size={28} />
           <span className="text-xs font-semibold">Refining text layout...</span>
+        </div>
+      )}
+
+      {onSwitchToHighFidelity && (
+        <div className="max-w-4xl mx-auto px-4 mb-4">
+          <div className="bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-200/80 rounded-2xl p-4 shadow-sm flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-500/10 flex items-center justify-center text-amber-600 shrink-0">
+                <Sparkles size={20} className="animate-pulse" />
+              </div>
+              <div>
+                <h4 className="font-bold text-sm text-neutral-900">Exact A4 Layout (LibreOffice)</h4>
+                <p className="text-xs text-neutral-500 font-medium">Render with 100% font accuracy, exact symbols, and true A4 page margins.</p>
+              </div>
+            </div>
+            <button
+              onClick={onSwitchToHighFidelity}
+              disabled={isConverting}
+              className="px-4 py-2.5 bg-amber-500 hover:bg-amber-600 active:scale-95 text-white text-xs font-bold rounded-xl shadow-sm transition-all shrink-0 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              <Sparkles size={14} />
+              <span>{isConverting ? "Converting..." : "View Perfect A4"}</span>
+            </button>
+          </div>
         </div>
       )}
 
@@ -3567,7 +3584,12 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
         <div className="w-full h-full flex flex-col bg-neutral-150 overflow-hidden">
           <ZoomPanContainer className="flex-1 overflow-hidden relative bg-neutral-50" resetDependency={file.id}>
             <div className="w-full h-full overflow-y-auto bg-neutral-50 py-6">
-              <WordDocxViewer arrayBuffer={fileArrayBuffer} htmlContent={htmlContent} />
+              <WordDocxViewer 
+                arrayBuffer={fileArrayBuffer} 
+                htmlContent={htmlContent}
+                onSwitchToHighFidelity={handleHighFidelityToggle}
+                isConverting={isConverting}
+              />
             </div>
           </ZoomPanContainer>
           
@@ -4728,27 +4750,27 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
         </div>
         <div className="flex items-center gap-2">
           {/* High-fidelity / Convert actions for PPT, Word, Excel, etc. */}
-          {file.type !== 'pdf' && file.type !== 'image' && file.type !== 'epub' && file.type !== 'doc' && file.type !== 'ppt' && file.type !== 'xlsx' && file.id !== 'welcome-guide' && file.id !== 'sample-stats' && (
+          {(file.type === 'doc' || file.type === 'ppt' || file.type === 'xlsx') && file.id !== 'welcome-guide' && file.id !== 'sample-stats' && (
             <div className="flex items-center gap-1.5 sm:gap-2">
               <button
                 disabled={isConverting}
                 onClick={handleHighFidelityToggle}
                 className={`flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all border active:scale-95 disabled:opacity-50 cursor-pointer ${
                   isHighFidelityMode
-                    ? "bg-amber-550 hover:bg-amber-600 text-white border-amber-600/30"
+                    ? "bg-amber-500 hover:bg-amber-600 text-white border-amber-600/30"
                     : "bg-white hover:bg-neutral-50 text-neutral-700 border-neutral-200 shadow-sm"
                 }`}
                 title={isHighFidelityMode ? "Switch back to standard format viewer" : "Convert and display using perfect visual PDF layout"}
               >
-                <Sparkles size={13} className={isHighFidelityMode ? "text-white animate-pulse" : "text-amber-550 animate-pulse"} />
+                <Sparkles size={13} className={isHighFidelityMode ? "text-white animate-pulse" : "text-amber-500 animate-pulse"} />
                 <span className="hidden sm:inline">{isHighFidelityMode ? "Exit 100% Layout" : "100% Layout View"}</span>
-                <span className="sm:hidden">{isHighFidelityMode ? "Standard" : "100% View"}</span>
+                <span className="sm:hidden">{isHighFidelityMode ? "Standard" : "100% A4 View"}</span>
               </button>
 
               <button
                 disabled={isConverting}
                 onClick={handleConvertToPdfAndSave}
-                className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white border border-rose-705/20 active:scale-95 disabled:opacity-50 cursor-pointer shadow-sm"
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white border border-rose-700/20 active:scale-95 disabled:opacity-50 cursor-pointer shadow-sm"
                 title="Convert this document to PDF and download it instantly"
               >
                 {isConverting && conversionStatus === 'converting' ? (
