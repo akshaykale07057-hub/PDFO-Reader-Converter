@@ -1911,46 +1911,32 @@ const HomeTab = React.memo(function HomeTab({
       </header>
 
       <div className="px-6 relative z-50">
-        <div className="flex items-center gap-3">
-          {(isSearchFocused || searchQuery.trim().length > 0) && (
+        <div className="relative group w-full">
+          <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-neutral-400 group-focus-within:text-blue-500 transition-colors" size={20} />
+          <input
+            type="text"
+            placeholder={t('searchPlaceholder')}
+            value={searchQuery}
+            onChange={(e) => onSearchChange(e.target.value)}
+            onFocus={() => onSearchFocusChange?.(true)}
+            onBlur={() => {
+              if (!searchQuery.trim()) {
+                onSearchFocusChange?.(false);
+              }
+            }}
+            className="w-full bg-white border border-neutral-200/60 shadow-sm rounded-full py-4 pl-14 pr-12 text-sm font-medium focus:ring-4 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all"
+          />
+          {searchQuery && (
             <button
               onClick={() => {
                 onCancelSearch?.();
               }}
-              className="w-12 h-12 rounded-full bg-white border border-neutral-200/60 shadow-sm flex items-center justify-center text-neutral-700 hover:bg-neutral-50 active:scale-95 transition-all shrink-0"
-              aria-label="Back"
+              className="absolute right-4 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-neutral-100 hover:bg-neutral-200 flex items-center justify-center text-neutral-500 transition-colors"
+              aria-label="Clear search"
             >
-              <ArrowLeft size={20} />
+              <X size={16} />
             </button>
           )}
-
-          <div className="relative group flex-1">
-            <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-neutral-400 group-focus-within:text-red-500 transition-colors" size={20} />
-            <input
-              type="text"
-              placeholder={t('searchPlaceholder')}
-              value={searchQuery}
-              onChange={(e) => onSearchChange(e.target.value)}
-              onFocus={() => onSearchFocusChange?.(true)}
-              onBlur={() => {
-                if (!searchQuery.trim()) {
-                  onSearchFocusChange?.(false);
-                }
-              }}
-              className="w-full bg-white border border-neutral-200/60 shadow-sm rounded-full py-4 pl-14 pr-12 text-sm font-medium focus:ring-4 focus:ring-red-500/10 focus:border-red-500 outline-none transition-all"
-            />
-            {searchQuery && (
-              <button
-                onClick={() => {
-                  onCancelSearch?.();
-                }}
-                className="absolute right-4 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-neutral-100 hover:bg-neutral-200 flex items-center justify-center text-neutral-500 transition-colors"
-                aria-label="Clear search"
-              >
-                <X size={16} />
-              </button>
-            )}
-          </div>
         </div>
 
         {searchQuery && (
