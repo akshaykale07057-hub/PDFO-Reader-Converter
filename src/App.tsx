@@ -37,6 +37,7 @@ import { Capacitor } from '@capacitor/core';
 import { App as CapApp } from '@capacitor/app';
 import { Share } from '@capacitor/share';
 import { SplashScreen } from '@capacitor/splash-screen';
+import { Keyboard } from '@capacitor/keyboard';
 import { DocFile, TabType } from './types';
 import { storageService } from './services/storageService';
 import { adService } from './services/adService';
@@ -129,6 +130,38 @@ export default function App() {
   const mainRef = useRef<HTMLDivElement>(null);
   const isScanningRef = useRef(false);
   const handleAutoScanRef = useRef<(isRetry?: boolean, isInitial?: boolean) => void>(() => {});
+
+  // Keyboard visibility detection to prevent bottom nav bar from covering search inputs
+  const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const handleResize = () => {
+      const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+      const kbOpen = (window.innerHeight - vh) > 120;
+      setIsKeyboardOpen(kbOpen);
+    };
+
+    window.visualViewport?.addEventListener('resize', handleResize);
+    window.visualViewport?.addEventListener('scroll', handleResize);
+    window.addEventListener('resize', handleResize);
+
+    let showSub: any;
+    let hideSub: any;
+    try {
+      showSub = Keyboard.addListener('keyboardWillShow', () => setIsKeyboardOpen(true));
+      hideSub = Keyboard.addListener('keyboardWillHide', () => setIsKeyboardOpen(false));
+    } catch (_) {}
+
+    return () => {
+      window.visualViewport?.removeEventListener('resize', handleResize);
+      window.visualViewport?.removeEventListener('scroll', handleResize);
+      window.removeEventListener('resize', handleResize);
+      showSub?.remove?.();
+      hideSub?.remove?.();
+    };
+  }, []);
 
   useEffect(() => {
     handleAutoScanRef.current = handleAutoScan;
@@ -1190,8 +1223,8 @@ export default function App() {
         </div>
       )}
 
-      {/* Bottom Navigation (shifted dynamically when AdMob banner is active) - Hidden when in camera/scan view */}
-      {activeTab !== 'scan' && (
+      {/* Bottom Navigation (shifted dynamically when AdMob banner is active) - Hidden when in camera/scan view or keyboard is open */}
+      {activeTab !== 'scan' && !isKeyboardOpen && (
         <div 
           className="fixed left-1/2 -translate-x-1/2 w-[calc(100%-3rem)] max-w-[380px] z-40 transition-all duration-300 ease-out"
           style={{ bottom: adBannerHeight > 0 ? `${adBannerHeight + 16}px` : '1.5rem' }}
