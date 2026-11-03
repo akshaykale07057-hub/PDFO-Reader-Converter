@@ -29,6 +29,7 @@ interface GenericToolFeatureProps {
   toolId: string;
   onClose: () => void;
   language?: string;
+  adBannerHeight?: number;
 }
 
 const TOOL_CONFIG: Record<string, any> = {
@@ -42,7 +43,7 @@ const TOOL_CONFIG: Record<string, any> = {
   'protect-pdf': { titleKey: 'protectPdf', descKey: 'addPassword', icon: Lock, ext: '_protected.pdf', accepts: {'application/pdf': ['.pdf']}, needsPassword: true },
 };
 
-export const GenericToolFeature: React.FC<GenericToolFeatureProps> = ({ toolId, onClose, language = 'English US' }) => {
+export const GenericToolFeature: React.FC<GenericToolFeatureProps> = ({ toolId, onClose, language = 'English US', adBannerHeight = 0 }) => {
   const t = getTranslator(language);
   const [file, setFile] = useState<File | null>(null);
   const [password, setPassword] = useState('');
@@ -990,7 +991,10 @@ export const GenericToolFeature: React.FC<GenericToolFeatureProps> = ({ toolId, 
     };
 
    return (
-     <div className="fixed inset-0 z-50 bg-neutral-100 flex flex-col md:p-6 pb-[90px] md:pb-6 overflow-hidden">
+     <div 
+       className="fixed inset-0 z-50 bg-neutral-100 flex flex-col md:p-6 overflow-hidden"
+       style={{ paddingBottom: adBannerHeight > 0 ? `${adBannerHeight + 12}px` : '1rem' }}
+     >
        <div className="bg-white md:rounded-[32px] shadow-2xl flex-1 flex flex-col overflow-hidden max-w-2xl mx-auto w-full relative border border-neutral-200/50">
          
          <div className="h-16 border-b border-neutral-100 flex items-center justify-between px-4 bg-white/80 backdrop-blur-md sticky top-0 z-10">
@@ -1008,7 +1012,7 @@ export const GenericToolFeature: React.FC<GenericToolFeatureProps> = ({ toolId, 
            </button>
          </div>
 
-         <div className="flex-1 overflow-y-auto p-6 flex flex-col">
+         <div className="flex-1 overflow-y-auto p-6 pb-12 flex flex-col">
            {!file ? (
              <div className="flex-1 flex flex-col items-center justify-center min-h-[400px]">
                <div 

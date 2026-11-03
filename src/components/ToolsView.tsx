@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { FileText, Image as ImageIcon, FileArchive, Copy, Scissors, Lock } from 'lucide-react';
 import { cn } from '../utils/cn';
 import { getTranslator } from '../utils/translator';
@@ -7,9 +7,10 @@ interface ToolsViewProps {
   onBack?: () => void;
   onSelectAction?: (action: string) => void;
   language?: string;
+  adBannerHeight?: number;
 }
 
-export const ToolsView = React.memo(function ToolsView({ onBack, onSelectAction, language = 'English US' }: ToolsViewProps) {
+export const ToolsView = React.memo(function ToolsView({ onBack, onSelectAction, language = 'English US', adBannerHeight = 0 }: ToolsViewProps) {
   const t = getTranslator(language);
 
   const tools = [
@@ -29,8 +30,19 @@ export const ToolsView = React.memo(function ToolsView({ onBack, onSelectAction,
     }
   };
 
+  // Dynamic bottom clearance so the last tools ("PDF to Word" & "Protect PDF")
+  // are completely visible, never blocked by the bottom navigation bar ("home strip")
+  // or by the AdMob banner when it elevates the navigation bar.
+  const dynamicPaddingBottom = useMemo(() => {
+    const clearance = adBannerHeight > 0 ? (adBannerHeight + 180) : 160;
+    return `${clearance}px`;
+  }, [adBannerHeight]);
+
   return (
-    <div className="pt-14 pb-32 px-6 space-y-6">
+    <div 
+      className="pt-14 px-6 space-y-6"
+      style={{ paddingBottom: dynamicPaddingBottom }}
+    >
       <header className="mb-8 font-sans">
         <h1 className="text-3xl font-display font-bold tracking-tight text-neutral-900">{t('tools')}</h1>
         <p className="text-neutral-500 mt-2 font-medium">{t('extraFeatures')}</p>
