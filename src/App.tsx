@@ -1912,7 +1912,7 @@ const HomeTab = React.memo(function HomeTab({
 
       <div className="px-6 relative z-50">
         <div className="relative group w-full">
-          <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-neutral-400 group-focus-within:text-blue-500 transition-colors" size={20} />
+          <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-neutral-400 group-focus-within:text-amber-500 transition-colors" size={20} />
           <input
             type="text"
             placeholder={t('searchPlaceholder')}
@@ -1924,7 +1924,7 @@ const HomeTab = React.memo(function HomeTab({
                 onSearchFocusChange?.(false);
               }
             }}
-            className="w-full bg-white border border-neutral-200/60 shadow-sm rounded-full py-4 pl-14 pr-12 text-sm font-medium focus:ring-4 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all"
+            className="w-full bg-white border border-neutral-200/60 shadow-sm rounded-full py-4 pl-14 pr-12 text-sm font-medium focus:ring-4 focus:ring-amber-400/25 focus:border-amber-500 outline-none transition-all"
           />
           {searchQuery && (
             <button
