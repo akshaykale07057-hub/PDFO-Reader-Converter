@@ -49,6 +49,8 @@ import { directShareFile, directShareMultipleFiles, downloadDocumentFile } from 
 import { cn } from './utils/cn';
 import { formatFileSize } from './utils/fileUtils';
 import { getTranslator, LANGUAGE_DISPLAY_NAMES } from './utils/translator';
+import { isOnlineSync, checkIsOnline } from './utils/networkUtils';
+import { OfflineAlertModal } from './components/OfflineAlertModal';
 
 const DocumentViewerModal = React.lazy(() => import('./components/DocumentViewerModal').then(m => ({ default: m.DocumentViewerModal })));
 const ScanView = React.lazy(() => import('./components/ScanView').then(m => ({ default: m.ScanView })));
@@ -85,6 +87,20 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showAppSplash, setShowAppSplash] = useState(true);
   const [adBannerHeight, setAdBannerHeight] = useState(0);
+  const [showOfflineModal, setShowOfflineModal] = useState(false);
+  const [offlineCustomMessage, setOfflineCustomMessage] = useState<string | undefined>(undefined);
+
+  useEffect(() => {
+    const handleShowOfflineAlert = (e: Event) => {
+      const customMsg = (e as CustomEvent)?.detail?.message;
+      setOfflineCustomMessage(customMsg);
+      setShowOfflineModal(true);
+    };
+    window.addEventListener('app:show-offline-alert', handleShowOfflineAlert);
+    return () => {
+      window.removeEventListener('app:show-offline-alert', handleShowOfflineAlert);
+    };
+  }, []);
 
   useEffect(() => {
     const handleAdHeightChange = (e: Event) => {
@@ -98,15 +114,18 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const handleShowSimulatedAd = (e: Event) => {
-      const customEvent = e as CustomEvent<{ onComplete: () => void }>;
+    const handleShowAdLoader = (e: Event) => {
+      const customEvent = e as CustomEvent<{ onComplete: () => void; onCancel?: () => void }>;
       if (customEvent.detail && typeof customEvent.detail.onComplete === 'function') {
-        setAdCallback({ run: customEvent.detail.onComplete });
+        setAdCallback({
+          run: customEvent.detail.onComplete,
+          cancel: customEvent.detail.onCancel,
+        });
       }
     };
-    window.addEventListener('show-simulated-ad', handleShowSimulatedAd);
+    window.addEventListener('show-ad-loader', handleShowAdLoader);
     return () => {
-      window.removeEventListener('show-simulated-ad', handleShowSimulatedAd);
+      window.removeEventListener('show-ad-loader', handleShowAdLoader);
     };
   }, []);
 
@@ -125,12 +144,12 @@ export default function App() {
   const [rating, setRating] = useState(0);
   const [feedbackText, setFeedbackText] = useState('');
   const [activeCategory, setActiveCategory] = useState<string>('All');
-  const [adCallback, setAdCallback] = useState<{ run: () => void } | null>(null);
+  const [adCallback, setAdCallback] = useState<{ run: () => void; cancel?: () => void } | null>(null);
   const [selectedLanguage, setSelectedLanguage] = useState(() => localStorage.getItem('selected_language') || 'English US');
 
   const mainRef = useRef<HTMLDivElement>(null);
   const isScanningRef = useRef(false);
-  const handleAutoScanRef = useRef<(isRetry?: boolean, isInitial?: boolean) => void>(() => {});
+  const handleAutoScanRef = useRef<(isRetry?: boolean, isInitial?: boolean) => void>(() => { });
 
   // Keyboard visibility detection to prevent bottom nav bar from covering search inputs
   const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
@@ -183,7 +202,7 @@ export default function App() {
           setIsSearchFocused(false);
         }
       }));
-    } catch (_) {}
+    } catch (_) { }
 
     return () => {
       window.visualViewport?.removeEventListener('resize', checkKeyboard);
@@ -265,7 +284,7 @@ export default function App() {
     }
     try {
       Keyboard.hide();
-    } catch (_) {}
+    } catch (_) { }
   }, []);
 
   // Back button handler
@@ -485,6 +504,10 @@ export default function App() {
   const t = getTranslator(selectedLanguage);
 
   const requirePremiumOrAd = useCallback((callback: () => void) => {
+    if (!isOnlineSync()) {
+      callback();
+      return;
+    }
     adService.showInterstitial(callback);
   }, []);
 
@@ -496,7 +519,7 @@ export default function App() {
       try {
         await Share.share({
           title: 'PDFO Reader & Converter',
-          text: 'Check out PDFO Reader & Converter — read, convert, compress, and scan documents offline!',
+          text: 'Check out PDFO Reader & Converter — read, convert, compress and scan documents offline!',
           url: playStoreUrl,
           dialogTitle: 'Share PDFO Reader & Converter',
         });
@@ -510,7 +533,7 @@ export default function App() {
       try {
         await navigator.share({
           title: 'PDFO Reader & Converter',
-          text: 'Check out PDFO Reader & Converter — read, convert, compress, and scan documents offline!',
+          text: 'Check out PDFO Reader & Converter — read, convert, compress and scan documents offline!',
           url: playStoreUrl,
         });
         return;
@@ -673,7 +696,7 @@ export default function App() {
     isScanningRef.current = true;
     setIsScanning(true);
     const startTime = Date.now();
-    
+
     (async () => {
       try {
         if (Capacitor.isNativePlatform()) {
@@ -908,12 +931,12 @@ export default function App() {
         adService.showAppOpenAd();
       }
     });
-    
+
     const handleFocus = () => {
       handleResume();
     };
     window.addEventListener('focus', handleFocus);
-    
+
     // Slight delay on mount to ensure app is fully initialized first
     const timer = setTimeout(() => {
       checkStartupScan();
@@ -928,7 +951,7 @@ export default function App() {
 
   useEffect(() => {
     // Hide native OS splash immediately so the app shows only the unified custom animated splash
-    SplashScreen.hide().catch(() => {});
+    SplashScreen.hide().catch(() => { });
 
     const initApp = async () => {
       // Quick fast startup: show the 3-dot animated splash briefly (~350ms) while loading documents, then quickly show interface
@@ -1004,14 +1027,31 @@ export default function App() {
   const openDoc = (file: DocFile) => {
     isOpeningDocRef.current = true;
     setSelectedFile(null);
-    // Show interstitial ad before opening/viewing document
-    adService.showInterstitial(async () => {
+
+    // When offline, completely bypass ads and open document immediately
+    if (!isOnlineSync()) {
       setViewingDoc(file);
       isOpeningDocRef.current = false;
       const updatedFile = { ...file, lastOpenedAt: Date.now() };
-      await storageService.saveFile(updatedFile);
-      await loadFiles();
-    });
+      storageService.saveFile(updatedFile);
+      loadFiles();
+      return;
+    }
+
+    // Show interstitial ad before opening/viewing document when online
+    adService.showInterstitial(
+      async () => {
+        setViewingDoc(file);
+        isOpeningDocRef.current = false;
+        const updatedFile = { ...file, lastOpenedAt: Date.now() };
+        await storageService.saveFile(updatedFile);
+        await loadFiles();
+      },
+      () => {
+        // User cancelled ad loader or ad failed to load: abort without opening document
+        isOpeningDocRef.current = false;
+      }
+    );
   };
 
   const handleViewingDocChange = async (newFile: DocFile) => {
@@ -1043,10 +1083,56 @@ export default function App() {
 
   const handleOpenSettings = useCallback(() => setShowSettings(true), []);
   const handleOpenQRScanner = useCallback(() => setShowQRScanner(true), []);
-  const handleOpenCompressor = useCallback(() => requirePremiumOrAd(() => setShowCompressor(true)), [requirePremiumOrAd]);
-  const handleOpenMerge = useCallback(() => requirePremiumOrAd(() => setShowMerge(true)), [requirePremiumOrAd]);
-  const handleOpenSplit = useCallback(() => requirePremiumOrAd(() => setShowSplit(true)), [requirePremiumOrAd]);
-  const handleToolActionSelect = useCallback((action: string) => {
+
+  const handleOpenCompressor = useCallback(async () => {
+    if (!isOnlineSync()) {
+      setShowOfflineModal(true);
+      return;
+    }
+    const online = await checkIsOnline();
+    if (!online) {
+      setShowOfflineModal(true);
+      return;
+    }
+    requirePremiumOrAd(() => setShowCompressor(true));
+  }, [requirePremiumOrAd]);
+
+  const handleOpenMerge = useCallback(async () => {
+    if (!isOnlineSync()) {
+      setShowOfflineModal(true);
+      return;
+    }
+    const online = await checkIsOnline();
+    if (!online) {
+      setShowOfflineModal(true);
+      return;
+    }
+    requirePremiumOrAd(() => setShowMerge(true));
+  }, [requirePremiumOrAd]);
+
+  const handleOpenSplit = useCallback(async () => {
+    if (!isOnlineSync()) {
+      setShowOfflineModal(true);
+      return;
+    }
+    const online = await checkIsOnline();
+    if (!online) {
+      setShowOfflineModal(true);
+      return;
+    }
+    requirePremiumOrAd(() => setShowSplit(true));
+  }, [requirePremiumOrAd]);
+
+  const handleToolActionSelect = useCallback(async (action: string) => {
+    if (!isOnlineSync()) {
+      setShowOfflineModal(true);
+      return;
+    }
+    const online = await checkIsOnline();
+    if (!online) {
+      setShowOfflineModal(true);
+      return;
+    }
     requirePremiumOrAd(() => {
       if (action === 'merge-pdf') setShowMerge(true);
       else if (action === 'split-pdf') setShowSplit(true);
@@ -1147,7 +1233,7 @@ export default function App() {
           accept=".pdf,application/pdf,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.doc,application/msword,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xls,application/vnd.ms-excel,.pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation,.ppt,application/vnd.ms-powerpoint,.epub,application/epub+zip,image/*"
           onChange={handleSyncComplete}
         />
-        
+
         {/* Home Tab Panel */}
         <div
           ref={homeContainerRef}
@@ -1284,8 +1370,8 @@ export default function App() {
       )}
 
       {/* Bottom Navigation (shifted dynamically when AdMob banner is active) - Hidden when in tools, camera/scan view, active tools, or keyboard is open */}
-      {activeTab !== 'scan' && activeTab !== 'tools' && !activeToolAction && !showCompressor && !showMerge && !showSplit && !isKeyboardOpen && (
-        <div 
+      {!(['scan', 'tools'] as TabType[]).includes(activeTab) && !activeToolAction && !showCompressor && !showMerge && !showSplit && !isKeyboardOpen && (
+        <div
           className="fixed left-1/2 -translate-x-1/2 w-[calc(100%-3rem)] max-w-[380px] z-40 transition-all duration-300 ease-out"
           style={{ bottom: adBannerHeight > 0 ? `${adBannerHeight + 16}px` : '1.5rem' }}
         >
@@ -1789,17 +1875,30 @@ export default function App() {
           <Suspense fallback={<ViewSuspenseFallback />}>
             <AdPlayerModal
               onComplete={() => {
-                adCallback.run();
+                const cb = adCallback;
                 setAdCallback(null);
+                cb?.run();
               }}
               onClose={() => {
                 isOpeningDocRef.current = false;
+                const cb = adCallback;
                 setAdCallback(null);
+                cb?.cancel?.();
               }}
             />
           </Suspense>
         )}
       </AnimatePresence>
+
+      <OfflineAlertModal
+        isOpen={showOfflineModal}
+        onClose={() => {
+          setShowOfflineModal(false);
+          setOfflineCustomMessage(undefined);
+        }}
+        language={selectedLanguage}
+        customMessage={offlineCustomMessage}
+      />
     </div>
   );
 }
@@ -1949,19 +2048,19 @@ const HomeTab = React.memo(function HomeTab({
                     <Files size={18} className="text-neutral-500" />
                   </div>
                   <div className="min-w-0">
-                      <p className="font-semibold text-neutral-900 truncate text-sm">{file.name}</p>
-                      <p className="text-xs text-neutral-500 truncate">{formatFileSize(file.size)}</p>
-                    </div>
-                  </button>
-                ))
-              ) : (
-                <div className="p-4 text-center text-sm font-medium text-neutral-500">
-                  {t('noMatches')} "{searchQuery}"
-                </div>
-              )}
-            </div>
-          )}
-        </div>
+                    <p className="font-semibold text-neutral-900 truncate text-sm">{file.name}</p>
+                    <p className="text-xs text-neutral-500 truncate">{formatFileSize(file.size)}</p>
+                  </div>
+                </button>
+              ))
+            ) : (
+              <div className="p-4 text-center text-sm font-medium text-neutral-500">
+                {t('noMatches')} "{searchQuery}"
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       <div className="grid grid-cols-4 gap-4 px-6">
         <button
@@ -2057,7 +2156,7 @@ const FilesTab = React.memo(function FilesTab({
   const t = getTranslator(language);
 
   return (
-    <div 
+    <div
       className="space-y-6 pb-32 pt-10"
       onTouchStart={onTouchStart}
       onTouchMove={onTouchMove}

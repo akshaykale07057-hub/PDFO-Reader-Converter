@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Upload, FileDown, ArrowRight, CheckCircle2, Loader2, X, Lock, FileArchive, Copy, Scissors, Presentation, Image as ImageIcon, FileText, FileSpreadsheet, Edit3, MinusCircle, ShieldCheck, Eye, EyeOff } from 'lucide-react';
+import { Upload, FileDown, ArrowRight, CheckCircle2, Loader2, X, Lock, FileArchive, Copy, Scissors, Presentation, Image as ImageIcon, FileText, FileSpreadsheet, Edit3, RotateCw, MinusCircle, ShieldCheck, Eye, EyeOff } from 'lucide-react';
 import { useDropzone } from 'react-dropzone';
 import { motion } from 'motion/react';
 import { PDFDocument } from 'pdf-lib';
@@ -24,6 +24,10 @@ import { adService } from '../services/adService';
 import { DocFile, FileType } from '../types';
 import { getTranslator } from '../utils/translator';
 import { getApiBaseUrl } from '../utils/apiConfig';
+import { isOnlineSync, checkIsOnline, triggerOfflineAlert, useNetworkStatus } from '../utils/networkUtils';
+import { OfflineBanner } from './OfflineAlertModal';
+import { Capacitor } from '@capacitor/core';
+import { downloadDocumentFile } from '../utils/shareUtils';
 
 interface GenericToolFeatureProps {
   toolId: string;
@@ -32,6 +36,39 @@ interface GenericToolFeatureProps {
 }
 
 const TOOL_CONFIG: Record<string, any> = {
+  'excel-to-pdf': { 
+    titleKey: 'excelToPdf', 
+    descKey: 'convertExcel', 
+    icon: FileSpreadsheet, 
+    ext: '.pdf', 
+    accepts: { 
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'], 
+      'application/vnd.ms-excel': ['.xls'], 
+      'text/csv': ['.csv'], 
+      'application/octet-stream': ['.xlsx', '.xls', '.csv'] 
+    } 
+  },
+  'pdf-to-excel': { 
+    titleKey: 'pdfToExcel', 
+    descKey: 'convertPdfToExcel', 
+    icon: FileSpreadsheet, 
+    ext: '.xlsx', 
+    accepts: { 'application/pdf': ['.pdf'] } 
+  },
+  'rotate-pdf': { 
+    titleKey: 'rotatePdf', 
+    descKey: 'rotatePdfDesc', 
+    icon: RotateCw, 
+    ext: '_rotated.pdf', 
+    accepts: { 'application/pdf': ['.pdf'] } 
+  },
+  'edit-pdf': { 
+    titleKey: 'rotatePdf', 
+    descKey: 'rotatePdfDesc', 
+    icon: RotateCw, 
+    ext: '_rotated.pdf', 
+    accepts: { 'application/pdf': ['.pdf'] } 
+  },
   'compress-pdf': { titleKey: 'compressPdf', descKey: 'reduceSize', icon: FileArchive, ext: '.pdf', accepts: {'application/pdf': ['.pdf']} },
   'jpg-to-pdf': { titleKey: 'jpgToPdf', descKey: 'convertJpg', icon: ImageIcon, ext: '.pdf', accepts: {'image/*': ['.jpg', '.jpeg', '.png']} },
   'pdf-to-jpg': { titleKey: 'pdfToJpg', descKey: 'extractImages', icon: ImageIcon, ext: '.jpg', accepts: {'application/pdf': ['.pdf']} },
@@ -44,6 +81,7 @@ const TOOL_CONFIG: Record<string, any> = {
 
 export const GenericToolFeature: React.FC<GenericToolFeatureProps> = ({ toolId, onClose, language = 'English US' }) => {
   const t = getTranslator(language);
+  const isOnline = useNetworkStatus();
   const [file, setFile] = useState<File | null>(null);
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -53,6 +91,10 @@ export const GenericToolFeature: React.FC<GenericToolFeatureProps> = ({ toolId, 
   const [isFinished, setIsFinished] = useState(false);
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [finalSize, setFinalSize] = useState<number | null>(null);
+  const [pdfRotation, setPdfRotation] = useState<number>(toolId === 'rotate-pdf' ? 90 : 0);
+  const [watermarkText, setWatermarkText] = useState<string>('');
+  const [addPageNumbers, setAddPageNumbers] = useState<boolean>(false);
+  const [removePagesInput, setRemovePagesInput] = useState<string>('');
 
   const config = TOOL_CONFIG[toolId] || TOOL_CONFIG['compress-pdf'];
   const title = t(config.titleKey);
@@ -417,6 +459,143 @@ export const GenericToolFeature: React.FC<GenericToolFeatureProps> = ({ toolId, 
         const pptBlob = await pres.write({ outputType: 'blob' }) as Blob;
         blob = pptBlob;
         setProgress(100);
+      } else if (toolId === 'pdf-to-excel') {
+        setProgress(20);
+        const arrayBuffer = await file.arrayBuffer();
+        const pdfDocument = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        const totalPages = pdfDocument.numPages;
+        
+        const wb = xlsx.utils.book_new();
+
+        for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
+          setProgress(20 + Math.round((pageNum / totalPages) * 70));
+          const page = await pdfDocument.getPage(pageNum);
+          const textContent = await page.getTextContent();
+          
+          interface TextItem {
+            str: string;
+            x: number;
+            y: number;
+          }
+          const items: TextItem[] = [];
+          for (const it of textContent.items as any[]) {
+            if (it.str && it.str.trim().length > 0) {
+              items.push({
+                str: it.str,
+                x: it.transform[4],
+                y: it.transform[5]
+              });
+            }
+          }
+
+          items.sort((a, b) => {
+            if (Math.abs(b.y - a.y) > 8) {
+              return b.y - a.y;
+            }
+            return a.x - b.x;
+          });
+
+          const rows: string[][] = [];
+          let currentLineY: number | null = null;
+          let currentRow: TextItem[] = [];
+
+          for (const it of items) {
+            if (currentLineY === null || Math.abs(it.y - currentLineY) <= 8) {
+              currentRow.push(it);
+              if (currentLineY === null) currentLineY = it.y;
+            } else {
+              currentRow.sort((a, b) => a.x - b.x);
+              rows.push(currentRow.map(r => r.str));
+              currentRow = [it];
+              currentLineY = it.y;
+            }
+          }
+          if (currentRow.length > 0) {
+            currentRow.sort((a, b) => a.x - b.x);
+            rows.push(currentRow.map(r => r.str));
+          }
+
+          if (rows.length === 0) {
+            rows.push([`Page ${pageNum}`]);
+          }
+
+          const ws = xlsx.utils.aoa_to_sheet(rows);
+          ws['!cols'] = Array(15).fill({ wch: 18 });
+          xlsx.utils.book_append_sheet(wb, ws, `Page ${pageNum}`);
+        }
+
+        const wbout = xlsx.write(wb, { bookType: 'xlsx', type: 'array' });
+        blob = new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        setProgress(100);
+      } else if (toolId === 'rotate-pdf' || toolId === 'edit-pdf') {
+        setProgress(20);
+        const { PDFDocument, rgb, degrees, StandardFonts } = await import('pdf-lib');
+        const arrayBuffer = await file.arrayBuffer();
+        const pdfDoc = await PDFDocument.load(arrayBuffer, { ignoreEncryption: true });
+        const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+        const pageCount = pdfDoc.getPageCount();
+
+        if (removePagesInput.trim()) {
+          const toRemove = removePagesInput
+            .split(',')
+            .map(s => parseInt(s.trim()))
+            .filter(n => !isNaN(n) && n >= 1 && n <= pageCount)
+            .sort((a, b) => b - a);
+          
+          for (const pageIdx of toRemove) {
+            if (pdfDoc.getPageCount() > 1) {
+              pdfDoc.removePage(pageIdx - 1);
+            }
+          }
+        }
+
+        const remainingPages = pdfDoc.getPages();
+        const totalRemaining = remainingPages.length;
+
+        for (let i = 0; i < totalRemaining; i++) {
+          setProgress(30 + Math.round((i / totalRemaining) * 60));
+          const p = remainingPages[i];
+          const { width, height } = p.getSize();
+
+          if (pdfRotation !== 0) {
+            p.setRotation(degrees((p.getRotation().angle + pdfRotation) % 360));
+          }
+
+          if (watermarkText.trim()) {
+            const text = watermarkText.trim();
+            const textSize = Math.min(width, height) / 8;
+            const textWidth = font.widthOfTextAtSize(text, textSize);
+            const textHeight = font.heightAtSize(textSize);
+
+            p.drawText(text, {
+              x: (width - textWidth) / 2,
+              y: (height - textHeight) / 2,
+              size: textSize,
+              font,
+              color: rgb(0.8, 0.2, 0.2),
+              opacity: 0.25,
+              rotate: degrees(45),
+            });
+          }
+
+          if (addPageNumbers) {
+            const pageNumText = `${i + 1} / ${totalRemaining}`;
+            const numSize = 10;
+            const numWidth = font.widthOfTextAtSize(pageNumText, numSize);
+            p.drawText(pageNumText, {
+              x: (width - numWidth) / 2,
+              y: 20,
+              size: numSize,
+              font,
+              color: rgb(0.4, 0.4, 0.4),
+              opacity: 0.8,
+            });
+          }
+        }
+
+        const finalBytes = await pdfDoc.save();
+        blob = new Blob([finalBytes], { type: 'application/pdf' });
+        setProgress(100);
       } else if (toolId === 'protect-pdf') {
         const { PDFDocument } = await import('pdf-lib');
         const { encryptPDF } = await import('@pdfsmaller/pdf-encrypt');
@@ -528,14 +707,18 @@ export const GenericToolFeature: React.FC<GenericToolFeatureProps> = ({ toolId, 
                        setBlobUrl(objectUrl);
                        setIsFinished(true);
 
-                       // Auto download the file straight away
+                       // Auto download the file straight away to Downloads folder
                        try {
-                         const a = document.createElement('a');
-                         a.href = newDoc.url;
-                         a.download = newDoc.name;
-                         document.body.appendChild(a);
-                         a.click();
-                         document.body.removeChild(a);
+                         if (Capacitor.isNativePlatform()) {
+                           downloadDocumentFile(newDoc, undefined, blob!);
+                         } else {
+                           const a = document.createElement('a');
+                           a.href = newDoc.url;
+                           a.download = newDoc.name;
+                           document.body.appendChild(a);
+                           a.click();
+                           document.body.removeChild(a);
+                         }
                        } catch (e) {
                          console.error("Auto download failed", e);
                        }
@@ -958,14 +1141,18 @@ export const GenericToolFeature: React.FC<GenericToolFeatureProps> = ({ toolId, 
             setBlobUrl(newDoc.url);
             setIsFinished(true);
 
-            // Auto download the file straight away so we can remove the manual download and process actions as requested
+            // Auto download the file straight away to mobile Downloads folder
             try {
-              const a = document.createElement('a');
-              a.href = newDoc.url;
-              a.download = newDoc.name;
-              document.body.appendChild(a);
-              a.click();
-              document.body.removeChild(a);
+              if (Capacitor.isNativePlatform()) {
+                downloadDocumentFile(newDoc, undefined, blob!);
+              } else {
+                const a = document.createElement('a');
+                a.href = newDoc.url;
+                a.download = newDoc.name;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+              }
             } catch (e) {
               console.error("Auto download failed", e);
             }
@@ -981,6 +1168,15 @@ export const GenericToolFeature: React.FC<GenericToolFeatureProps> = ({ toolId, 
 
     const handleProcess = async () => {
       if (!file) return;
+      if (!isOnlineSync()) {
+        triggerOfflineAlert();
+        return;
+      }
+      const online = await checkIsOnline();
+      if (!online) {
+        triggerOfflineAlert();
+        return;
+      }
       if (config.needsPassword && !password) {
         alert('Please enter a password');
         return;
@@ -1009,6 +1205,9 @@ export const GenericToolFeature: React.FC<GenericToolFeatureProps> = ({ toolId, 
          </div>
 
          <div className="flex-1 overflow-y-auto p-6 flex flex-col">
+           {!isOnline && (
+             <OfflineBanner language={language} className="mb-4 shrink-0" />
+           )}
            {!file ? (
              <div className="flex-1 flex flex-col items-center justify-center min-h-[400px]">
                <div 
@@ -1061,6 +1260,63 @@ export const GenericToolFeature: React.FC<GenericToolFeatureProps> = ({ toolId, 
                     >
                       {showPassword ? <EyeOff size={20} /> : <Eye size={20} />}
                     </button>
+                  </div>
+                </div>
+              )}
+
+              {(toolId === 'rotate-pdf' || toolId === 'edit-pdf') && (
+                <div className="bg-neutral-50 p-5 rounded-[24px] border border-neutral-200/50 space-y-4">
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-xs font-bold text-neutral-700">Rotation Angle</label>
+                      <span className="text-[11px] font-mono font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full border border-blue-100">
+                        {pdfRotation === 0 ? "Normal (0°)" : `${pdfRotation}° Clockwise`}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-4 gap-2">
+                      {[
+                        { deg: 90, label: "90° Right" },
+                        { deg: 180, label: "180° Flip" },
+                        { deg: 270, label: "270° Left" },
+                        { deg: 0, label: "0° (Reset)" },
+                      ].map(item => (
+                        <button
+                          key={item.deg}
+                          type="button"
+                          onClick={() => setPdfRotation(item.deg)}
+                          className={`py-2.5 text-xs font-bold rounded-xl border transition-all ${
+                            pdfRotation === item.deg
+                              ? "bg-blue-600 text-white border-blue-600 shadow-sm"
+                              : "bg-white text-neutral-700 border-neutral-200 hover:bg-neutral-100"
+                          }`}
+                        >
+                          {item.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-neutral-700 mb-1.5">Add Watermark / Stamp Text (Optional)</label>
+                    <input
+                      type="text"
+                      value={watermarkText}
+                      onChange={e => setWatermarkText(e.target.value)}
+                      placeholder="e.g. CONFIDENTIAL, APPROVED"
+                      className="w-full bg-white border border-neutral-200/80 rounded-[14px] py-2.5 px-3 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between pt-1">
+                    <label className="text-xs font-bold text-neutral-700 cursor-pointer">
+                      Add Page Numbers (Page 1 of N)
+                    </label>
+                    <input
+                      type="checkbox"
+                      checked={addPageNumbers}
+                      onChange={e => setAddPageNumbers(e.target.checked)}
+                      className="w-4 h-4 text-blue-600 rounded border-neutral-300 focus:ring-blue-500 cursor-pointer"
+                    />
                   </div>
                 </div>
               )}

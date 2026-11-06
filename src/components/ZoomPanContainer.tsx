@@ -7,13 +7,17 @@ interface ZoomPanContainerProps {
   className?: string;
   contentClassName?: string;
   resetDependency?: any;
+  minZoom?: number;
+  maxZoom?: number;
 }
 
 export const ZoomPanContainer: React.FC<ZoomPanContainerProps> = ({
   children,
   className = "w-full h-full relative overflow-hidden flex-1",
   contentClassName = "w-full h-full",
-  resetDependency
+  resetDependency,
+  minZoom = 0.4,
+  maxZoom = 5.0
 }) => {
   const [zoom, setZoom] = useState(1.0);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -39,6 +43,10 @@ export const ZoomPanContainer: React.FC<ZoomPanContainerProps> = ({
     if (!container) return;
     const W = container.clientWidth;
     const H = container.clientHeight;
+    if (zoom <= 1.0) {
+      setPan({ x: 0, y: 0 });
+      return;
+    }
     const maxPanX = Math.max(0, (W * (zoom - 1)) / 2);
     const maxPanY = Math.max(0, (H * (zoom - 1)) / 2);
     setPan(prev => ({
@@ -55,7 +63,7 @@ export const ZoomPanContainer: React.FC<ZoomPanContainerProps> = ({
   };
 
   const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
-    if (zoom > 1.0 || e.touches.length === 2) {
+    if (Math.abs(zoom - 1.0) > 0.02 || e.touches.length === 2) {
       e.stopPropagation();
     }
 
@@ -63,8 +71,8 @@ export const ZoomPanContainer: React.FC<ZoomPanContainerProps> = ({
     if (e.touches.length === 1) {
       const now = Date.now();
       if (now - lastTouchTimeRef.current < 300) {
-        // Double tap: toggle zoom
-        if (zoom > 1.0) {
+        // Double tap: toggle zoom (if zoomed in or out, reset to normal 1.0; if normal 1.0, zoom in to 2.0)
+        if (Math.abs(zoom - 1.0) > 0.05) {
           setZoom(1.0);
           setPan({ x: 0, y: 0 });
         } else {
@@ -82,7 +90,7 @@ export const ZoomPanContainer: React.FC<ZoomPanContainerProps> = ({
         lastTouchDistanceRef.current = dist;
       }
       isDraggingRef.current = false;
-    } else if (e.touches.length === 1) {
+    } else if (e.touches.length === 1 && zoom > 1.0) {
       isDraggingRef.current = true;
       dragStartRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
       panStartRef.current = { ...pan };
@@ -90,6 +98,7 @@ export const ZoomPanContainer: React.FC<ZoomPanContainerProps> = ({
   };
 
   const handleTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
+    // 2-finger Pinch gesture: smooth zoom in AND zoom out from normal page
     if (e.touches.length === 2 && lastTouchDistanceRef.current !== null) {
       const dist = getTouchDistance(e);
       if (dist !== null) {
@@ -101,7 +110,7 @@ export const ZoomPanContainer: React.FC<ZoomPanContainerProps> = ({
         
         setZoom(prev => {
           const next = prev * delta;
-          return Math.max(1.0, Math.min(next, 5.0));
+          return Math.max(minZoom, Math.min(next, maxZoom));
         });
       }
     } else if (e.touches.length === 1 && isDraggingRef.current && zoom > 1.0) {
@@ -127,7 +136,7 @@ export const ZoomPanContainer: React.FC<ZoomPanContainerProps> = ({
   };
 
   const handleTouchEnd = (e: React.TouchEvent) => {
-    if (zoom > 1.0) {
+    if (Math.abs(zoom - 1.0) > 0.02) {
       e.stopPropagation();
     }
     if (e.touches.length < 2) {
@@ -135,7 +144,7 @@ export const ZoomPanContainer: React.FC<ZoomPanContainerProps> = ({
     }
     if (e.touches.length === 0) {
       isDraggingRef.current = false;
-    } else if (e.touches.length === 1 && !isDraggingRef.current) {
+    } else if (e.touches.length === 1 && !isDraggingRef.current && zoom > 1.0) {
       isDraggingRef.current = true;
       dragStartRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
       panStartRef.current = { ...pan };
@@ -153,7 +162,7 @@ export const ZoomPanContainer: React.FC<ZoomPanContainerProps> = ({
   };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!isDraggingRef.current) return;
+    if (!isDraggingRef.current || zoom <= 1.0) return;
     const dx = e.clientX - dragStartRef.current.x;
     const dy = e.clientY - dragStartRef.current.y;
     
@@ -180,7 +189,7 @@ export const ZoomPanContainer: React.FC<ZoomPanContainerProps> = ({
     if (e.ctrlKey) {
       e.preventDefault();
       const delta = e.deltaY < 0 ? 1.1 : 0.9;
-      setZoom(prev => Math.max(1.0, Math.min(prev * delta, 5.0)));
+      setZoom(prev => Math.max(minZoom, Math.min(prev * delta, maxZoom)));
     }
   };
 
@@ -201,7 +210,7 @@ export const ZoomPanContainer: React.FC<ZoomPanContainerProps> = ({
         className={contentClassName}
         style={{
           transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-          transformOrigin: 'center center',
+          transformOrigin: zoom < 1.0 ? 'top center' : 'center center',
           transition: isDraggingRef.current ? 'none' : 'transform 0.15s cubic-bezier(0.25, 0.46, 0.45, 0.94)',
           width: '100%',
           height: '100%'
@@ -212,16 +221,16 @@ export const ZoomPanContainer: React.FC<ZoomPanContainerProps> = ({
 
       {/* Floating glassmorphic HUD */}
       <AnimatePresence>
-        {zoom > 1.0 && (
+        {Math.abs(zoom - 1.0) > 0.02 && (
           <motion.div
             initial={{ opacity: 0, y: 15, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 10, scale: 0.95 }}
             transition={{ duration: 0.2, ease: "easeOut" }}
-            className="absolute bottom-4 right-4 bg-neutral-900/80 backdrop-blur-md text-white border border-white/10 rounded-xl px-2.5 py-1.5 flex items-center gap-2 shadow-2xl z-[9999] select-none pointer-events-auto"
+            className="absolute bottom-4 right-4 bg-neutral-900/85 backdrop-blur-md text-white border border-white/10 rounded-xl px-2.5 py-1.5 flex items-center gap-2 shadow-2xl z-[9999] select-none pointer-events-auto"
           >
             <button
-              onClick={() => setZoom(prev => Math.max(1.0, prev - 0.25))}
+              onClick={() => setZoom(prev => Math.max(minZoom, Number((prev - 0.2).toFixed(2))))}
               className="w-6.5 h-6.5 rounded-lg flex items-center justify-center hover:bg-white/15 active:scale-90 transition-all text-xs font-bold cursor-pointer text-neutral-300 hover:text-white"
               title="Zoom Out"
             >
@@ -231,7 +240,7 @@ export const ZoomPanContainer: React.FC<ZoomPanContainerProps> = ({
               {Math.round(zoom * 100)}%
             </span>
             <button
-              onClick={() => setZoom(prev => Math.min(5.0, prev + 0.25))}
+              onClick={() => setZoom(prev => Math.min(maxZoom, Number((prev + 0.2).toFixed(2))))}
               className="w-6.5 h-6.5 rounded-lg flex items-center justify-center hover:bg-white/15 active:scale-90 transition-all text-xs font-bold cursor-pointer text-neutral-300 hover:text-white"
               title="Zoom In"
             >

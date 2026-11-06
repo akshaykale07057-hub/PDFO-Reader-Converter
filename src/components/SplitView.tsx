@@ -9,9 +9,12 @@ import { storageService } from '../services/storageService';
 import { adService } from '../services/adService';
 import { DocFile } from '../types';
 import { getTranslator } from '../utils/translator';
+import { isOnlineSync, checkIsOnline, triggerOfflineAlert, useNetworkStatus } from '../utils/networkUtils';
+import { OfflineBanner } from './OfflineAlertModal';
 
 export const SplitView: React.FC<{ language?: string }> = ({ language = 'English US' }) => {
   const t = getTranslator(language);
+  const isOnline = useNetworkStatus();
   const [file, setFile] = useState<File | null>(null);
   const [isSplitting, setIsSplitting] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -109,6 +112,15 @@ export const SplitView: React.FC<{ language?: string }> = ({ language = 'English
 
   const handleSplit = async () => {
     if (!file) return;
+    if (!isOnlineSync()) {
+      triggerOfflineAlert();
+      return;
+    }
+    const online = await checkIsOnline();
+    if (!online) {
+      triggerOfflineAlert();
+      return;
+    }
     // Show interstitial ad before split starts
     adService.showInterstitial(performSplit);
   };
@@ -129,6 +141,10 @@ export const SplitView: React.FC<{ language?: string }> = ({ language = 'English
         <h2 className="text-3xl font-display font-bold text-neutral-900 tracking-tight">{t('splitPdf')}</h2>
         <p className="text-neutral-500 font-medium">{t('extractSpecificPagesDesc')}</p>
       </div>
+
+      {!isOnline && (
+        <OfflineBanner language={language} className="mb-2" />
+      )}
 
       {!file ? (
         <div 

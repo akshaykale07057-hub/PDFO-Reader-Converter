@@ -5,7 +5,7 @@ import { storageService } from '../services/storageService';
 import { DocFile } from '../types';
 
 // Helper to convert Blob to Base64
-const convertBlobToBase64 = (blob: Blob): Promise<string> => {
+export const convertBlobToBase64 = (blob: Blob): Promise<string> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = reject;
@@ -39,6 +39,7 @@ const writeBlobToFilesystemInChunks = async (
         path: fileName,
         data: base64Data,
         directory,
+        recursive: true,
       });
       isFirst = false;
     } else {
@@ -81,6 +82,10 @@ export const getMimeType = (fileName: string, blobType?: string): string => {
     'jpg': 'image/jpeg',
     'jpeg': 'image/jpeg',
     'png': 'image/png',
+    'gif': 'image/gif',
+    'svg': 'image/svg+xml',
+    'bmp': 'image/bmp',
+    'ico': 'image/x-icon',
     'epub': 'application/epub+zip',
     'txt': 'text/plain',
     'csv': 'text/csv'
@@ -250,36 +255,127 @@ export const directShareMultipleFiles = async (
 
   // Download fallback for each file
   for (const f of files) {
-    let fileData = await storageService.getFileData(f.id);
-    if (!fileData) {
-      if (f.id === 'welcome-guide') {
-        fileData = new Blob(["Welcome Guide Content"], { type: 'text/html' });
-      } else if (f.id === 'sample-stats') {
-        fileData = new Blob(["[]"], { type: 'application/json' });
-      } else {
-        continue;
+    if (Capacitor.isNativePlatform()) {
+      await downloadDocumentFile(f);
+    } else {
+      let fileData = await storageService.getFileData(f.id);
+      if (!fileData) {
+        if (f.id === 'welcome-guide') {
+          fileData = new Blob(["Welcome Guide Content"], { type: 'text/html' });
+        } else if (f.id === 'sample-stats') {
+          fileData = new Blob(["[]"], { type: 'application/json' });
+        } else {
+          continue;
+        }
       }
+      const mimeType = getMimeType(f.name, fileData.type);
+      const url = URL.createObjectURL(new Blob([fileData], { type: mimeType }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = f.name;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
     }
-    const mimeType = getMimeType(f.name, fileData.type);
-    const url = URL.createObjectURL(new Blob([fileData], { type: mimeType }));
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = f.name;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
   }
+};
+
+// Saves a binary Blob to the device's public Download folder on Android/native platforms
+export const saveBlobToDeviceDownload = async (
+  fileName: string,
+  typedBlob: Blob
+): Promise<{ success: boolean; folder: string; uri?: string }> => {
+  // 1. Ensure storage permission on Android
+  try {
+    const perm = await Filesystem.checkPermissions();
+    if (perm.publicStorage !== 'granted') {
+      await Filesystem.requestPermissions();
+    }
+  } catch (pErr) {
+    console.warn("Storage permission check/request warning:", pErr);
+  }
+
+  const writeTargetFile = async (directory: Directory, targetPath: string): Promise<string> => {
+    if (typedBlob.size > 2 * 1024 * 1024) {
+      return await writeBlobToFilesystemInChunks(targetPath, typedBlob, directory);
+    } else {
+      const base64Data = await convertBlobToBase64(typedBlob);
+      const res = await Filesystem.writeFile({
+        path: targetPath,
+        data: base64Data,
+        directory,
+        recursive: true
+      });
+      return res.uri;
+    }
+  };
+
+  // 1st Priority: Save directly to Android public Download folder via Directory.ExternalStorage ('Download/' + fileName)
+  try {
+    const uri = await writeTargetFile(Directory.ExternalStorage, `Download/${fileName}`);
+    return { success: true, folder: 'Downloads', uri };
+  } catch (e1) {
+    console.warn("Writing to ExternalStorage/Download failed:", e1);
+  }
+
+  // 2nd Priority: Directory.ExternalStorage -> Downloads/${fileName}
+  try {
+    const uri = await writeTargetFile(Directory.ExternalStorage, `Downloads/${fileName}`);
+    return { success: true, folder: 'Downloads', uri };
+  } catch (e2) {
+    console.warn("Writing to ExternalStorage/Downloads failed:", e2);
+  }
+
+  // 3rd Priority: Directory.Documents with path Download/${fileName}
+  try {
+    const uri = await writeTargetFile(Directory.Documents, `Download/${fileName}`);
+    return { success: true, folder: 'Downloads', uri };
+  } catch (e3) {
+    console.warn("Writing to Documents/Download failed:", e3);
+  }
+
+  // 4th Priority: Directory.ExternalStorage root
+  try {
+    const uri = await writeTargetFile(Directory.ExternalStorage, fileName);
+    return { success: true, folder: 'Downloads', uri };
+  } catch (e4) {
+    console.warn("Writing to ExternalStorage root failed:", e4);
+  }
+
+  // 5th Priority: Native Share dialog via Cache (user can choose "Save to Downloads")
+  try {
+    const base64Data = await convertBlobToBase64(typedBlob);
+    const cacheResult = await Filesystem.writeFile({
+      path: fileName,
+      data: base64Data,
+      directory: Directory.Cache
+    });
+    await Share.share({
+      title: fileName,
+      url: cacheResult.uri,
+      dialogTitle: `Save ${fileName} to Downloads`
+    });
+    return { success: true, folder: 'Downloads', uri: cacheResult.uri };
+  } catch (e5) {
+    console.error("All native write/share attempts failed:", e5);
+  }
+
+  return { success: false, folder: '' };
 };
 
 // Robust unified download file function (works seamlessly on Android Capacitor and Web)
 export const downloadDocumentFile = async (
-  file: DocFile,
-  htmlContentFallback?: string
+  file: DocFile | { id?: string; name: string; type?: any; url?: string; size?: number },
+  htmlContentFallback?: string,
+  customBlob?: Blob
 ): Promise<void> => {
   try {
     // 1. Retrieve file data
-    let fileData = await storageService.getFileData(file.id);
+    let fileData: Blob | null = customBlob || null;
+    if (!fileData && file.id) {
+      fileData = await storageService.getFileData(file.id);
+    }
     if (!fileData && file.url) {
       fileData = await storageService.getFileData(file.url);
     }
@@ -309,58 +405,14 @@ export const downloadDocumentFile = async (
     const mimeType = getMimeType(file.name, fileData.type);
     const typedBlob = new Blob([fileData], { type: mimeType });
 
-    // 2. Native Capacitor download / save to device
+    // 2. Native Capacitor download / save to mobile Download folder
     if (Capacitor.isNativePlatform()) {
-      const base64Data = await convertBlobToBase64(typedBlob);
-      let savedFolder = 'Documents';
-      let success = false;
-
-      // Try Directory.Documents first
-      try {
-        await Filesystem.writeFile({
-          path: file.name,
-          data: base64Data,
-          directory: Directory.Documents,
-          recursive: true
-        });
-        success = true;
-        savedFolder = 'Documents';
-      } catch (e1) {
-        console.warn("Saving to Directory.Documents failed, trying ExternalStorage/Download", e1);
-        try {
-          await Filesystem.writeFile({
-            path: `Download/${file.name}`,
-            data: base64Data,
-            directory: Directory.ExternalStorage,
-            recursive: true
-          });
-          success = true;
-          savedFolder = 'Downloads';
-        } catch (e2) {
-          console.warn("Saving to Download failed, trying Cache and native share/save dialog", e2);
-          try {
-            const cacheResult = await Filesystem.writeFile({
-              path: file.name,
-              data: base64Data,
-              directory: Directory.Cache
-            });
-            await Share.share({
-              title: file.name,
-              url: cacheResult.uri,
-              dialogTitle: `Save ${file.name}`
-            });
-            success = true;
-            savedFolder = 'Device';
-          } catch (e3) {
-            console.error("All native write attempts failed", e3);
-          }
-        }
-      }
+      const { success, folder } = await saveBlobToDeviceDownload(file.name, typedBlob);
 
       if (success) {
-        alert(`Downloaded successfully! File saved to ${savedFolder}: ${file.name}`);
+        alert(`Downloaded successfully! File saved to ${folder}: ${file.name}`);
       } else {
-        alert(`Failed to save ${file.name} to device storage.`);
+        alert(`Failed to save ${file.name} to mobile Downloads folder.`);
       }
       return;
     }

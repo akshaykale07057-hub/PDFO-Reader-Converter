@@ -18,6 +18,8 @@ import { Capacitor } from '@capacitor/core';
 import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import { getApiBaseUrl } from '../utils/apiConfig';
+import { isOnlineSync, checkIsOnline, triggerOfflineAlert } from '../utils/networkUtils';
+import { downloadDocumentFile } from '../utils/shareUtils';
 
 interface ShareModalProps {
   files: DocFile[];
@@ -112,6 +114,16 @@ export const ShareModal: React.FC<ShareModalProps> = ({ files, onClose, onDownlo
   };
 
   const handleAlternativeConvert = async (targetFormat: 'doc' | 'ppt' | 'xlsx' | 'epub' | 'pdf') => {
+    if (!isOnlineSync()) {
+      triggerOfflineAlert();
+      return;
+    }
+    const online = await checkIsOnline();
+    if (!online) {
+      triggerOfflineAlert();
+      return;
+    }
+
     setIsConverting(true);
     setConversionProgress(0);
     setConversionFormat(targetFormat);
@@ -1175,26 +1187,30 @@ export const ShareModal: React.FC<ShareModalProps> = ({ files, onClose, onDownlo
     if (onDownload) {
       files.forEach(f => onDownload(f));
     } else {
-      // Direct storageService download fallback
+      // Direct download into mobile Downloads folder
       files.forEach(async f => {
         try {
-          const blob = await storageService.getFileData(f.id);
-          if (blob) {
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = f.name;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
+          if (Capacitor.isNativePlatform()) {
+            await downloadDocumentFile(f);
+          } else {
+            const blob = await storageService.getFileData(f.id);
+            if (blob) {
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = f.name;
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+              URL.revokeObjectURL(url);
+            }
           }
         } catch (e) {
           console.error("Direct download copy failed", e);
         }
       });
     }
-    setSuccessMsg("Document copy downloaded!");
+    setSuccessMsg("Document copy downloaded to Downloads folder!");
     setTimeout(() => {
       setSuccessMsg(null);
     }, 2000);

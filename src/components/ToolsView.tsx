@@ -1,7 +1,9 @@
 import React from 'react';
-import { FileText, Image as ImageIcon, FileArchive, Copy, Scissors, Lock, ArrowLeft } from 'lucide-react';
+import { FileText, Image as ImageIcon, Lock, ArrowLeft, WifiOff, FileSpreadsheet, RotateCw } from 'lucide-react';
 import { cn } from '../utils/cn';
 import { getTranslator } from '../utils/translator';
+import { useNetworkStatus, isOnlineSync, triggerOfflineAlert } from '../utils/networkUtils';
+import { OfflineBanner } from './OfflineAlertModal';
 
 interface ToolsViewProps {
   onBack?: () => void;
@@ -11,19 +13,26 @@ interface ToolsViewProps {
 
 export const ToolsView = React.memo(function ToolsView({ onBack, onSelectAction, language = 'English US' }: ToolsViewProps) {
   const t = getTranslator(language);
+  const isOnline = useNetworkStatus();
 
   const tools = [
-    { id: 'compress-pdf', icon: FileArchive, labelKey: 'compressPdf', descKey: 'reduceSize', color: 'text-rose-500', bg: 'bg-rose-50' },
-    { id: 'merge-pdf', icon: Copy, labelKey: 'mergePdfLabel', descKey: 'combineMultiple', color: 'text-indigo-500', bg: 'bg-indigo-50' },
-    { id: 'split-pdf', icon: Scissors, labelKey: 'splitPdfLabel', descKey: 'extractPages', color: 'text-emerald-500', bg: 'bg-emerald-50' },
+    { id: 'excel-to-pdf', icon: FileSpreadsheet, labelKey: 'excelToPdf', descKey: 'convertExcel', color: 'text-emerald-600', bg: 'bg-emerald-50' },
+    { id: 'pdf-to-excel', icon: FileSpreadsheet, labelKey: 'pdfToExcel', descKey: 'convertPdfToExcel', color: 'text-teal-600', bg: 'bg-teal-50' },
+    { id: 'rotate-pdf', icon: RotateCw, labelKey: 'rotatePdf', descKey: 'rotatePdfDesc', color: 'text-amber-500', bg: 'bg-amber-50' },
     { id: 'jpg-to-pdf', icon: ImageIcon, labelKey: 'jpgToPdf', descKey: 'convertJpg', color: 'text-blue-500', bg: 'bg-blue-50' },
-    { id: 'pdf-to-jpg', icon: ImageIcon, labelKey: 'pdfToJpg', descKey: 'extractImages', color: 'text-amber-500', bg: 'bg-amber-50' },
+    { id: 'pdf-to-jpg', icon: ImageIcon, labelKey: 'pdfToJpg', descKey: 'extractImages', color: 'text-purple-500', bg: 'bg-purple-50' },
     { id: 'word-to-pdf', icon: FileText, labelKey: 'wordToPdf', descKey: 'convertDoc', color: 'text-blue-600', bg: 'bg-blue-50' },
     { id: 'pdf-to-word', icon: FileText, labelKey: 'pdfToWord', descKey: 'convertPdf', color: 'text-indigo-600', bg: 'bg-indigo-50' },
     { id: 'protect-pdf', icon: Lock, labelKey: 'protectPdf', descKey: 'addPassword', color: 'text-zinc-600', bg: 'bg-zinc-100' },
   ];
 
   const handleToolClick = (tool: any) => {
+    // If offline, document conversion/tools are blocked!
+    if (!isOnlineSync()) {
+      triggerOfflineAlert();
+      return;
+    }
+
     if (onSelectAction) {
       onSelectAction(tool.id);
     }
@@ -31,7 +40,7 @@ export const ToolsView = React.memo(function ToolsView({ onBack, onSelectAction,
 
   return (
     <div className="pt-10 pb-12 px-6 space-y-6">
-      <header className="mb-6 font-sans flex items-center gap-4">
+      <header className="mb-2 font-sans flex items-center gap-4">
         {onBack && (
           <button
             onClick={onBack}
@@ -47,13 +56,26 @@ export const ToolsView = React.memo(function ToolsView({ onBack, onSelectAction,
         </div>
       </header>
 
+      {/* Offline Warning Banner */}
+      {!isOnline && (
+        <OfflineBanner language={language} className="mb-2" />
+      )}
+
       <div className="grid grid-cols-2 gap-4">
         {tools.map(tool => (
           <button 
             key={tool.id}
             onClick={() => handleToolClick(tool)}
-            className="flex flex-col items-center text-center p-6 bg-white border border-neutral-200/60 rounded-[24px] shadow-sm hover:shadow-md hover:border-neutral-300 transition-all active:scale-95 gap-3"
+            className={cn(
+              "relative flex flex-col items-center text-center p-6 bg-white border border-neutral-200/60 rounded-[24px] shadow-sm hover:shadow-md hover:border-neutral-300 transition-all active:scale-95 gap-3 cursor-pointer",
+              !isOnline && "opacity-85 hover:border-rose-200"
+            )}
           >
+            {!isOnline && (
+              <div className="absolute top-3 right-3 w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center" title="Offline - requires internet">
+                <WifiOff size={11} strokeWidth={2.5} />
+              </div>
+            )}
             <div className={cn("w-16 h-16 rounded-[20px] flex items-center justify-center", tool.bg, tool.color)}>
               <tool.icon size={28} strokeWidth={2} />
             </div>

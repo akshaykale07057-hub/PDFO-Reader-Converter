@@ -9,9 +9,14 @@ import { storageService } from '../services/storageService';
 import { adService } from '../services/adService';
 import { DocFile } from '../types';
 import { getTranslator } from '../utils/translator';
+import { isOnlineSync, checkIsOnline, triggerOfflineAlert, useNetworkStatus } from '../utils/networkUtils';
+import { OfflineBanner } from './OfflineAlertModal';
+import { Capacitor } from '@capacitor/core';
+import { downloadDocumentFile } from '../utils/shareUtils';
 
 export const CompressorView: React.FC<{ onComplete?: () => void; language?: string }> = ({ onComplete, language = 'English US' }) => {
   const t = getTranslator(language);
+  const isOnline = useNetworkStatus();
   const [file, setFile] = useState<File | null>(null);
   const [compressedFile, setCompressedFile] = useState<File | null>(null);
   const [isCompressing, setIsCompressing] = useState(false);
@@ -84,19 +89,39 @@ export const CompressorView: React.FC<{ onComplete?: () => void; language?: stri
 
   const handleCompress = async () => {
     if (!file) return;
+    if (!isOnlineSync()) {
+      triggerOfflineAlert();
+      return;
+    }
+    const online = await checkIsOnline();
+    if (!online) {
+      triggerOfflineAlert();
+      return;
+    }
     // Show interstitial ad before compression starts
     adService.showInterstitial(performCompress);
   };
 
-  const downloadCompressed = () => {
+  const downloadCompressed = async () => {
     if (!compressedFile) return;
-    const url = URL.createObjectURL(compressedFile);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = compressedFile.name;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    if (Capacitor.isNativePlatform()) {
+      await downloadDocumentFile({
+        id: `compressed-${Date.now()}`,
+        name: compressedFile.name,
+        type: 'image',
+        size: compressedFile.size,
+        createdAt: Date.now(),
+        url: URL.createObjectURL(compressedFile)
+      }, undefined, compressedFile);
+    } else {
+      const url = URL.createObjectURL(compressedFile);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = compressedFile.name;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
   };
 
   return (
@@ -105,6 +130,10 @@ export const CompressorView: React.FC<{ onComplete?: () => void; language?: stri
         <h2 className="text-3xl font-display font-bold text-neutral-900 tracking-tight">{t('sizeConverter')}</h2>
         <p className="text-neutral-500 font-medium">{t('compressImagesDesc')}</p>
       </div>
+
+      {!isOnline && (
+        <OfflineBanner language={language} className="mb-2" />
+      )}
 
       {!file ? (
         <div 

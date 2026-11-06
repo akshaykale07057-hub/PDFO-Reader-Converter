@@ -1,6 +1,8 @@
-import React, { useState, useEffect } from 'react';
-import { Play, Loader2, Crown, X } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Play, Loader2, X, WifiOff, RefreshCw, AlertCircle, ShieldCheck } from 'lucide-react';
 import { cn } from '../utils/cn';
+import { isOnlineSync } from '../utils/networkUtils';
+import { adService } from '../services/adService';
 
 interface AdPlayerModalProps {
   onComplete: () => void;
@@ -9,75 +11,123 @@ interface AdPlayerModalProps {
 }
 
 export const AdPlayerModal: React.FC<AdPlayerModalProps> = ({ onComplete, onClose }) => {
-  const [timeLeft, setTimeLeft] = useState(5);
-  const [isPlaying, setIsPlaying] = useState(false);
+  const [status, setStatus] = useState<'loading' | 'failed' | 'showing'>('loading');
+  const [statusText, setStatusText] = useState('Connecting to ad network...');
+  const isStartedRef = useRef(false);
 
+  // If user is completely offline, bypass ads so offline files can be read
   useEffect(() => {
-    let timer: any;
-    if (isPlaying && timeLeft > 0) {
-      timer = setInterval(() => {
-        setTimeLeft(prev => prev - 1);
-      }, 1000);
-    } else if (isPlaying && timeLeft === 0) {
+    if (!isOnlineSync()) {
       onComplete();
     }
-    return () => clearInterval(timer);
-  }, [isPlaying, timeLeft, onComplete]);
+  }, [onComplete]);
+
+  const startAdFlow = useCallback(async () => {
+    setStatus('loading');
+    setStatusText('Connecting to ad network...');
+
+    const result = await adService.loadAndShowInterstitial((step) => {
+      if (step === 'connecting') {
+        setStatusText('Connecting to ad network...');
+      } else if (step === 'downloading') {
+        setStatusText('Buffering video ad...');
+      } else if (step === 'showing') {
+        setStatus('showing');
+        setStatusText('Ad ready! Showing now...');
+      }
+    });
+
+    if (result === 'success') {
+      onComplete();
+    } else {
+      setStatus('failed');
+    }
+  }, [onComplete]);
+
+  // Start loading the real AdMob ad immediately when modal opens
+  useEffect(() => {
+    if (!isStartedRef.current) {
+      isStartedRef.current = true;
+      startAdFlow();
+    }
+  }, [startAdFlow]);
 
   return (
-    <div className="fixed inset-0 bg-black/90 z-[70] flex flex-col items-center justify-center p-6 backdrop-blur-sm">
-      <div className="w-full max-w-md bg-neutral-900 rounded-[32px] overflow-hidden shadow-2xl border border-white/10 relative">
-        {onClose && !isPlaying && (
-          <button 
+    <div className="fixed inset-0 bg-black/90 z-[70] flex flex-col items-center justify-center p-6 backdrop-blur-sm select-none">
+      <div className="w-full max-w-sm bg-neutral-900 rounded-[32px] overflow-hidden shadow-2xl border border-white/10 relative p-8 text-center flex flex-col items-center">
+        {/* Close / Cancel Button */}
+        {onClose && (
+          <button
             onClick={onClose}
-            className="absolute top-6 right-6 text-neutral-400 hover:text-white transition-colors cursor-pointer z-10"
-            aria-label="Close"
+            className="absolute top-6 right-6 text-neutral-400 hover:text-white transition-colors cursor-pointer z-10 p-2 rounded-full hover:bg-white/10 active:scale-95"
+            aria-label="Cancel"
+            title="Cancel"
           >
             <X size={20} />
           </button>
         )}
-        {!isPlaying ? (
-          <div className="p-8 text-center flex flex-col items-center">
-            <div className="w-20 h-20 bg-amber-500/20 rounded-full flex items-center justify-center mb-6">
-              <Play className="text-amber-500" size={32} />
+
+        {status === 'loading' || status === 'showing' ? (
+          <>
+            {/* Pulsing Ad Loading Icon */}
+            <div className="relative w-24 h-24 mb-6 flex items-center justify-center">
+              <div className="absolute inset-0 rounded-full bg-amber-500/20 animate-ping opacity-60" />
+              <div className="w-20 h-20 rounded-full bg-amber-500/10 border border-amber-500/30 flex items-center justify-center relative">
+                <Loader2 className="animate-spin text-amber-500" size={36} />
+              </div>
             </div>
-            <h2 className="text-2xl font-bold text-white mb-2">Watch Ad to Continue</h2>
-            <p className="text-neutral-400 mb-8">
-              Support free document tools by watching a short video.
+
+            <h2 className="text-2xl font-bold text-white mb-2">Loading Ad...</h2>
+            <p className="text-neutral-400 text-sm mb-6 leading-relaxed">
+              Please wait while the ad loads over your network. Your document will open immediately after watching.
             </p>
-            
-            <div className="flex flex-col w-full gap-4">
-              <button 
-                onClick={() => setIsPlaying(true)}
-                className="w-full py-4 bg-white text-black font-bold rounded-2xl active:scale-95 transition-all text-lg"
-              >
-                Watch Short Ad (5s)
-              </button>
+
+            {/* Network Step Badge */}
+            <div className="w-full py-3 px-4 bg-neutral-800/80 border border-white/5 rounded-2xl flex items-center justify-center gap-2.5 text-neutral-300 text-xs font-medium">
+              <div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+              <span>{statusText}</span>
             </div>
-          </div>
+
+            {onClose && (
+              <button
+                onClick={onClose}
+                className="mt-6 text-xs text-neutral-500 hover:text-neutral-300 transition-colors underline cursor-pointer"
+              >
+                Cancel and return to files
+              </button>
+            )}
+          </>
         ) : (
-          <div className="p-8 text-center flex flex-col items-center aspect-video justify-center relative">
-             {/* Mock Ad Content */}
-             <div className="absolute inset-0 bg-neutral-800 flex items-center justify-center">
-                <div className="flex flex-col items-center gap-4 text-white/50">
-                  <Loader2 className="animate-spin" size={32} />
-                  <span>Loading amazing offer...</span>
-                </div>
-             </div>
-             
-             {/* Ad Overlay Controls */}
-             <div className="absolute top-4 right-4 z-10 w-10 h-10 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center text-white/90 font-bold border border-white/10">
-               {timeLeft}
-             </div>
-             <div className="absolute bottom-4 left-0 w-full px-4 z-10">
-                <div className="h-1 w-full bg-white/20 rounded-full overflow-hidden">
-                  <div 
-                    className="h-full bg-amber-500 transition-all duration-1000 ease-linear"
-                    style={{ width: `${((5 - timeLeft) / 5) * 100}%` }}
-                  />
-                </div>
-             </div>
-          </div>
+          <>
+            {/* Failed State due to slow / weak internet */}
+            <div className="w-20 h-20 rounded-full bg-rose-500/10 border border-rose-500/20 flex items-center justify-center mb-6 text-rose-400">
+              <WifiOff size={34} />
+            </div>
+
+            <h2 className="text-xl font-bold text-white mb-2">Network Too Slow</h2>
+            <p className="text-neutral-400 text-xs mb-8 leading-relaxed">
+              Ad could not load due to poor internet speed. Documents can only be viewed after an ad is watched.
+            </p>
+
+            <div className="flex flex-col w-full gap-3">
+              <button
+                onClick={startAdFlow}
+                className="w-full py-3.5 bg-amber-500 hover:bg-amber-400 active:scale-95 text-black font-bold rounded-2xl transition-all text-sm flex items-center justify-center gap-2 shadow-lg shadow-amber-500/20 cursor-pointer"
+              >
+                <RefreshCw size={16} />
+                Retry Loading Ad
+              </button>
+
+              {onClose && (
+                <button
+                  onClick={onClose}
+                  className="w-full py-3 bg-neutral-800 hover:bg-neutral-700 active:scale-95 text-neutral-300 font-semibold rounded-2xl transition-all text-sm cursor-pointer"
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+          </>
         )}
       </div>
     </div>

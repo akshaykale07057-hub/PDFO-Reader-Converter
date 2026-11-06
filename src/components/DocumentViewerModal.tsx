@@ -11,12 +11,15 @@ import { storageService } from '../services/storageService';
 import { directShareFile, downloadDocumentFile } from '../utils/shareUtils';
 import { getTranslator } from '../utils/translator';
 import { getApiBaseUrl } from '../utils/apiConfig';
+import { isOnlineSync, checkIsOnline, triggerOfflineAlert } from '../utils/networkUtils';
 import * as mammoth from 'mammoth';
 import * as XLSX from 'xlsx';
 import { PDFDocument } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import JSZip from 'jszip';
 import { ZoomPanContainer } from './ZoomPanContainer';
+import { PdfZoomStripContainer } from './PdfZoomStripContainer';
+import { ExcelSpreadsheetViewer } from './ExcelSpreadsheetViewer';
 import { Capacitor } from '@capacitor/core';
 import { Keyboard } from '@capacitor/keyboard';
 
@@ -434,6 +437,38 @@ const TRANSLATIONS: Record<string, Record<string, string>> = {
   }
 };
 
+// High-fidelity presentation engine instance cache
+let pptxEnginePromise: Promise<{ 
+  convert: (data: Uint8Array) => string; 
+  convert_with_options?: (data: Uint8Array, embed_images: boolean, include_hidden: boolean, slide_indices: Uint32Array, scale: number) => string;
+  get_presentation_info?: (data: Uint8Array) => any 
+}> | null = null;
+
+const ensurePptxEngine = async () => {
+  if (!pptxEnginePromise) {
+    pptxEnginePromise = (async () => {
+      const module = await import('@briank-dev/pptx2html-turbo');
+      const initPptx = module.default;
+      const convert = module.convert;
+      const convert_with_options = module.convert_with_options;
+      const get_presentation_info = module.get_presentation_info;
+      try {
+        // @ts-ignore
+        const pptxWasmUrl = (await import('../../node_modules/@briank-dev/pptx2html-turbo/pptx2html_wasm_bg.wasm?url')).default;
+        await initPptx(pptxWasmUrl);
+      } catch (wasmLoadErr) {
+        try {
+          await initPptx();
+        } catch (e) {
+          console.warn("WASM init note:", e);
+        }
+      }
+      return { convert, convert_with_options, get_presentation_info };
+    })();
+  }
+  return pptxEnginePromise;
+};
+
 // Custom PPT slides parser using JSZip
 const parsePptx = async (arrayBuffer: ArrayBuffer) => {
   try {
@@ -596,6 +631,56 @@ const parsePptx = async (arrayBuffer: ArrayBuffer) => {
         return null;
       };
 
+      // Resolve absolute slide coordinates handling nested group transforms (<p:grpSp>)
+      const getShapeAbsoluteCoords = (node: Element) => {
+        const direct = parseXfrm(node);
+        if (!direct) return null;
+        let finalX = direct.x;
+        let finalY = direct.y;
+        let finalW = direct.w;
+        let finalH = direct.h;
+
+        // Traverse upwards to resolve parent group transforms (<p:grpSp>)
+        let parent: Element | null = node.parentElement;
+        while (parent && parent !== xmlDoc.documentElement) {
+          const pName = (parent.localName || parent.nodeName.split(':').pop() || '').toLowerCase();
+          if (pName === 'grpsp') {
+            const grpSpPr = getElementsByLocalName(parent, 'grpSpPr')[0] || parent;
+            const grpXfrms = getElementsByLocalName(grpSpPr, 'xfrm');
+            if (grpXfrms.length > 0) {
+              const gX = grpXfrms[0];
+              const offs = getElementsByLocalName(gX, 'off');
+              const chOffs = getElementsByLocalName(gX, 'chOff');
+              const exts = getElementsByLocalName(gX, 'ext');
+              const chExts = getElementsByLocalName(gX, 'chExt');
+
+              if (offs.length > 0) {
+                const offX = parseInt(offs[0].getAttribute('x') || '0', 10);
+                const offY = parseInt(offs[0].getAttribute('y') || '0', 10);
+                const chOffX = chOffs.length > 0 ? parseInt(chOffs[0].getAttribute('x') || '0', 10) : 0;
+                const chOffY = chOffs.length > 0 ? parseInt(chOffs[0].getAttribute('y') || '0', 10) : 0;
+
+                const extCx = exts.length > 0 ? parseInt(exts[0].getAttribute('cx') || '1', 10) : 1;
+                const chExtCx = chExts.length > 0 ? parseInt(chExts[0].getAttribute('cx') || '1', 10) : 1;
+                const scaleX = chExtCx > 0 ? extCx / chExtCx : 1;
+
+                const extCy = exts.length > 0 ? parseInt(exts[0].getAttribute('cy') || '1', 10) : 1;
+                const chExtCy = chExts.length > 0 ? parseInt(chExts[0].getAttribute('cy') || '1', 10) : 1;
+                const scaleY = chExtCy > 0 ? extCy / chExtCy : 1;
+
+                finalX = offX + (finalX - chOffX) * scaleX;
+                finalY = offY + (finalY - chOffY) * scaleY;
+                finalW = finalW * scaleX;
+                finalH = finalH * scaleY;
+              }
+            }
+          }
+          parent = parent.parentElement;
+        }
+
+        return { x: finalX, y: finalY, w: finalW, h: finalH };
+      };
+
       // 2. Parse all slide pictures & shape elements containing image/icon blips
       const allBlips = getElementsByLocalName(xmlDoc, 'blip');
       for (const blip of allBlips) {
@@ -649,13 +734,13 @@ const parsePptx = async (arrayBuffer: ArrayBuffer) => {
               reader.readAsDataURL(imgBlob);
             });
 
-            // Climb up ancestors to find layout frame coordinates
+            // Climb up ancestors to find layout frame coordinates (including groups)
             let shapeAncestor: Element | null = blip.parentElement;
             let coords = null;
             while (shapeAncestor) {
               const sLName = (shapeAncestor.localName || shapeAncestor.nodeName.split(':').pop() || '').toLowerCase();
               if (['pic', 'sp', 'cxnsp', 'graphicframe', 'grpsp'].includes(sLName)) {
-                coords = parseXfrm(shapeAncestor);
+                coords = getShapeAbsoluteCoords(shapeAncestor);
                 if (coords) break;
               }
               shapeAncestor = shapeAncestor.parentElement;
@@ -667,7 +752,8 @@ const parsePptx = async (arrayBuffer: ArrayBuffer) => {
               x: coords ? (coords.x / slideWidth) * 100 : 20,
               y: coords ? (coords.y / slideHeight) * 100 : 25,
               w: coords ? (coords.w / slideWidth) * 100 : 60,
-              h: coords ? (coords.h / slideHeight) * 100 : 50
+              h: coords ? (coords.h / slideHeight) * 100 : 50,
+              hasCoords: !!coords
             });
           }
         }
@@ -713,7 +799,7 @@ const parsePptx = async (arrayBuffer: ArrayBuffer) => {
         }
 
         if (bullets.length > 0) {
-          const coords = parseXfrm(shape);
+          const coords = getShapeAbsoluteCoords(shape);
           const textVal = fullText.trim();
 
           if (textVal) {
@@ -765,6 +851,7 @@ const parsePptx = async (arrayBuffer: ArrayBuffer) => {
                   y: posY,
                   w: posW,
                   h: posH,
+                  hasCoords: !!coords,
                   color: isTitle ? '#1e293b' : '#475569'
                 });
               }
@@ -836,7 +923,8 @@ const parsePptx = async (arrayBuffer: ArrayBuffer) => {
             const isNearY = Math.abs(existing.y - el.y) < 5.0;
             const isNearX = Math.abs(existing.x - el.x) < 5.0;
 
-            if ((xOverlap && yOverlap) || (isNearY && isNearX)) {
+            // Only merge if text boxes physically overlap in both X and Y dimensions
+            if (xOverlap && yOverlap) {
               if (existing.text.toLowerCase().includes(el.text.toLowerCase())) {
                 merged = true;
                 break;
@@ -872,11 +960,42 @@ const parsePptx = async (arrayBuffer: ArrayBuffer) => {
         }
       }
 
+      // De-collision pass: Ensure images and texts do not overlap each other
+      const slideHasImages = refinedElements.some(e => e.type === 'image');
+      const slideHasTexts = refinedElements.some(e => e.type === 'text');
+      if (slideHasImages && slideHasTexts) {
+        refinedElements.forEach(el => {
+          if (!el.hasCoords) {
+            if (el.type === 'image') {
+              el.x = 54;
+              el.y = 24;
+              el.w = 42;
+              el.h = 68;
+            } else if (el.type === 'text') {
+              if (el.isTitle) {
+                el.x = 5;
+                el.y = 5;
+                el.w = 90;
+                el.h = 16;
+              } else {
+                el.x = 5;
+                el.y = 24;
+                el.w = 46;
+                el.h = 68;
+              }
+            }
+          }
+        });
+      }
+
       parsedSlides.push({
         title: slideTitle || `Slide ${parsedSlides.length + 1}`,
         content: slideBullets,
         backgroundColor,
         backgroundImage,
+        width: 960,
+        height: 540,
+        isHighFidelity: false,
         elements: refinedElements.length > 0 ? refinedElements : [
           {
             type: 'text',
@@ -909,7 +1028,677 @@ const parsePptx = async (arrayBuffer: ArrayBuffer) => {
   }
 };
 
-// Canvas page renderer for PDF with Lazy Loading & Memory Optimization
+// Helper to parse CSS color string to RGB
+const parseCssColorToRgb = (colorStr: string): { r: number; g: number; b: number } | null => {
+  if (!colorStr) return null;
+  const s = colorStr.trim().toLowerCase().replace('!important', '').trim();
+  if (s === 'transparent' || s === 'inherit' || s === 'none' || s === 'initial' || s === 'unset') return null;
+
+  // Handle CSS gradients by averaging stop colors for contrast and luminance calculations
+  if (s.includes('gradient')) {
+    const hexMatches = s.match(/#[a-f0-9]{6}|#[a-f0-9]{3}/gi) || [];
+    const rgbMatches = s.match(/rgba?\(\s*\d+\s*,\s*\d+\s*,\s*\d+/gi) || [];
+    const stopColors: { r: number; g: number; b: number }[] = [];
+    for (const h of hexMatches) {
+      const parsed = parseCssColorToRgb(h);
+      if (parsed) stopColors.push(parsed);
+    }
+    for (const r of rgbMatches) {
+      const parsed = parseCssColorToRgb(r + ')');
+      if (parsed) stopColors.push(parsed);
+    }
+    if (stopColors.length > 0) {
+      const avgR = Math.round(stopColors.reduce((sum, c) => sum + c.r, 0) / stopColors.length);
+      const avgG = Math.round(stopColors.reduce((sum, c) => sum + c.g, 0) / stopColors.length);
+      const avgB = Math.round(stopColors.reduce((sum, c) => sum + c.b, 0) / stopColors.length);
+      return { r: avgR, g: avgG, b: avgB };
+    }
+  }
+  
+  if (s.startsWith('#')) {
+    const hex = s.slice(1).trim();
+    if (hex.length === 3) {
+      return {
+        r: parseInt(hex[0] + hex[0], 16),
+        g: parseInt(hex[1] + hex[1], 16),
+        b: parseInt(hex[2] + hex[2], 16)
+      };
+    } else if (hex.length >= 6) {
+      return {
+        r: parseInt(hex.slice(0, 2), 16),
+        g: parseInt(hex.slice(2, 4), 16),
+        b: parseInt(hex.slice(4, 6), 16)
+      };
+    }
+  }
+  
+  const rgbMatch = s.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+  if (rgbMatch) {
+    if (rgbMatch[4] !== undefined && parseFloat(rgbMatch[4]) === 0) return null;
+    return {
+      r: parseInt(rgbMatch[1], 10),
+      g: parseInt(rgbMatch[2], 10),
+      b: parseInt(rgbMatch[3], 10)
+    };
+  }
+
+  if (s === 'white') return { r: 255, g: 255, b: 255 };
+  if (s === 'black') return { r: 0, g: 0, b: 0 };
+  
+  return null;
+};
+
+// Calculate WCAG relative luminance (0.0 to 1.0)
+const getRgbLuminance = (rgb: { r: number; g: number; b: number }): number => {
+  const a = [rgb.r, rgb.g, rgb.b].map(v => {
+    v /= 255;
+    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * a[0] + 0.7152 * a[1] + 0.0722 * a[2];
+};
+
+// Calculate WCAG contrast ratio (1.0 to 21.0)
+const calculateContrastRatio = (
+  rgb1: { r: number; g: number; b: number }, 
+  rgb2: { r: number; g: number; b: number }
+): number => {
+  const l1 = getRgbLuminance(rgb1);
+  const l2 = getRgbLuminance(rgb2);
+  const lighter = Math.max(l1, l2);
+  const darker = Math.min(l1, l2);
+  return (lighter + 0.05) / (darker + 0.05);
+};
+
+// Extract slide-level background colors and gradients from OpenXML package (slide -> layout -> master -> theme)
+const extractPptxSlideBackgrounds = async (arrayBuffer: ArrayBuffer): Promise<(string | null)[]> => {
+  const backgrounds: (string | null)[] = [];
+  try {
+    const zip = await JSZip.loadAsync(arrayBuffer);
+    
+    // Parse theme color scheme (dk1, lt1, dk2, lt2, etc.)
+    const themeColors: Record<string, string> = {};
+    const themeFileKey = Object.keys(zip.files).find(k => /^ppt\/theme\/theme\d+\.xml$/i.test(k)) || 'ppt/theme/theme1.xml';
+    const themeXml = await zip.files[themeFileKey]?.async('string') || '';
+    if (themeXml) {
+      const match = themeXml.match(/<a:clrScheme[^>]*>([\s\S]*?)<\/a:clrScheme>/);
+      if (match) {
+        const clrSchemeInner = match[1];
+        const clrRegex = /<a:([a-zA-Z0-9]+)>[\s\S]*?(?:val="([A-Fa-f0-9]{6})"|lastClr="([A-Fa-f0-9]{6})")[\s\S]*?<\/a:\1>/g;
+        let m;
+        while ((m = clrRegex.exec(clrSchemeInner)) !== null) {
+          themeColors[m[1]] = '#' + (m[2] || m[3]);
+        }
+        // Map OpenXML standard theme color aliases
+        if (themeColors['lt1']) themeColors['bg1'] = themeColors['lt1'];
+        if (themeColors['dk1']) themeColors['tx1'] = themeColors['dk1'];
+        if (themeColors['lt2']) themeColors['bg2'] = themeColors['lt2'];
+        if (themeColors['dk2']) themeColors['tx2'] = themeColors['dk2'];
+      }
+    }
+
+    // Helper: Parse OpenXML <a:gradFill> into CSS linear-gradient
+    const parseGradFill = (gradXml: string): string | null => {
+      if (!gradXml) return null;
+      const gsRegex = /<a:gs\s+pos="(\d+)"[^>]*>([\s\S]*?)<\/a:gs>/g;
+      let gsMatch;
+      const stops: { pos: number; color: string }[] = [];
+
+      while ((gsMatch = gsRegex.exec(gradXml)) !== null) {
+        const pos = Math.min(100, Math.max(0, Math.round(parseInt(gsMatch[1], 10) / 1000)));
+        const inner = gsMatch[2];
+        let color: string | null = null;
+
+        const srgb = inner.match(/<a:srgbClr\s+val="([A-Fa-f0-9]{6})"/i);
+        if (srgb) {
+          color = '#' + srgb[1];
+        } else {
+          const scheme = inner.match(/<a:schemeClr\s+val="([^"]+)"/i);
+          if (scheme && themeColors[scheme[1]]) {
+            color = themeColors[scheme[1]];
+          } else {
+            const sys = inner.match(/<a:sysClr[^>]*lastClr="([A-Fa-f0-9]{6})"/i);
+            if (sys) color = '#' + sys[1];
+          }
+        }
+
+        // Apply lumMod / shade / tint if present
+        if (color) {
+          const lumMod = inner.match(/<a:lumMod\s+val="(\d+)"/i);
+          if (lumMod) {
+            const factor = parseInt(lumMod[1], 10) / 100000;
+            const rgb = parseCssColorToRgb(color);
+            if (rgb) {
+              const r = Math.min(255, Math.max(0, Math.round(rgb.r * factor)));
+              const g = Math.min(255, Math.max(0, Math.round(rgb.g * factor)));
+              const b = Math.min(255, Math.max(0, Math.round(rgb.b * factor)));
+              color = '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('');
+            }
+          }
+          stops.push({ pos, color });
+        }
+      }
+
+      if (stops.length < 2) return null;
+      stops.sort((a, b) => a.pos - b.pos);
+
+      // Parse angle: in OpenXML, 5400000 is 90 deg (top-to-bottom in CSS: 180deg)
+      let angle = 180;
+      const linMatch = gradXml.match(/<a:lin\s+ang="(\d+)"/i);
+      if (linMatch) {
+        const pptAng = parseInt(linMatch[1], 10) / 60000;
+        angle = Math.round((pptAng + 90) % 360);
+      }
+
+      return `linear-gradient(${angle}deg, ${stops.map(s => `${s.color} ${s.pos}%`).join(', ')})`;
+    };
+
+    // Parse theme background fill styles list: <a:bgFillStyleLst>
+    const themeBgStyles: (string | null)[] = [];
+    if (themeXml) {
+      const bgFillLstMatch = themeXml.match(/<a:bgFillStyleLst[^>]*>([\s\S]*?)<\/a:bgFillStyleLst>/i);
+      if (bgFillLstMatch) {
+        const innerLst = bgFillLstMatch[1];
+        const fillRegex = /<a:(solidFill|gradFill)[^>]*>([\s\S]*?)<\/a:\1>/g;
+        let fm;
+        while ((fm = fillRegex.exec(innerLst)) !== null) {
+          const fillType = fm[1];
+          const fillContent = fm[0];
+          if (fillType === 'solidFill') {
+            const srgb = fillContent.match(/<a:srgbClr\s+val="([A-Fa-f0-9]{6})"/i);
+            if (srgb) {
+              themeBgStyles.push('#' + srgb[1]);
+            } else {
+              const scheme = fillContent.match(/<a:schemeClr\s+val="([^"]+)"/i);
+              if (scheme && themeColors[scheme[1]]) {
+                themeBgStyles.push(themeColors[scheme[1]]);
+              } else {
+                themeBgStyles.push(null);
+              }
+            }
+          } else if (fillType === 'gradFill') {
+            themeBgStyles.push(parseGradFill(fillContent));
+          } else {
+            themeBgStyles.push(null);
+          }
+        }
+      }
+    }
+
+    const resolveBgFromXml = (xml: string): string | null => {
+      if (!xml) return null;
+      // 1. <p:bg>
+      const bgMatch = xml.match(/<p:bg>([\s\S]*?)<\/p:bg>/i);
+      if (bgMatch) {
+        const bgContent = bgMatch[1];
+        const grad = parseGradFill(bgContent);
+        if (grad) return grad;
+        const srgb = bgContent.match(/<a:srgbClr\s+val="([A-Fa-f0-9]{6})"/i);
+        if (srgb) return '#' + srgb[1];
+        const scheme = bgContent.match(/<a:schemeClr\s+val="([^"]+)"/i);
+        if (scheme && themeColors[scheme[1]]) return themeColors[scheme[1]];
+      }
+      // 2. <p:bgRef>
+      const bgRefMatch = xml.match(/<p:bgRef([^>]*)>([\s\S]*?)<\/p:bgRef>/i);
+      if (bgRefMatch) {
+        const attrs = bgRefMatch[1];
+        const refContent = bgRefMatch[2];
+        const srgb = refContent.match(/<a:srgbClr\s+val="([A-Fa-f0-9]{6})"/i);
+        if (srgb) return '#' + srgb[1];
+        const scheme = refContent.match(/<a:schemeClr\s+val="([^"]+)"/i);
+        if (scheme && themeColors[scheme[1]]) return themeColors[scheme[1]];
+
+        // Reference index into themeBgStyles: idx="1001" etc.
+        const idxMatch = attrs.match(/idx="(\d+)"/i);
+        if (idxMatch) {
+          const idx = parseInt(idxMatch[1], 10);
+          if (idx > 1000 && themeBgStyles[idx - 1001]) {
+            return themeBgStyles[idx - 1001];
+          } else if (idx >= 1 && themeBgStyles[idx - 1]) {
+            return themeBgStyles[idx - 1];
+          }
+        }
+      }
+      return null;
+    };
+
+    const slideKeys = Object.keys(zip.files)
+      .filter(k => /^ppt\/slides\/slide\d+\.xml$/i.test(k))
+      .sort((a, b) => {
+        const numA = parseInt(a.replace(/[^0-9]/g, '') || '0', 10);
+        const numB = parseInt(b.replace(/[^0-9]/g, '') || '0', 10);
+        return numA - numB;
+      });
+
+    for (const key of slideKeys) {
+      const sldXml = await zip.files[key].async('string');
+      let bg = resolveBgFromXml(sldXml);
+      
+      // If not directly on slide, follow layout relationship
+      if (!bg) {
+        const slideNum = key.replace(/[^0-9]/g, '');
+        const relsKey = `ppt/slides/_rels/slide${slideNum}.xml.rels`;
+        const relsXml = await zip.files[relsKey]?.async('string') || '';
+        const layoutTarget = relsXml.match(/Type="[^"]*slideLayout"[^>]*Target="([^"]+)"/i)?.[1];
+        if (layoutTarget) {
+          const cleanTarget = layoutTarget.replace(/^\.\.\//, 'ppt/');
+          const layoutXml = await zip.files[cleanTarget]?.async('string') || '';
+          bg = resolveBgFromXml(layoutXml);
+
+          // If not on layout, check master
+          if (!bg) {
+            const layoutRelsKey = cleanTarget.replace('slideLayouts/slideLayout', 'slideLayouts/_rels/slideLayout') + '.rels';
+            const layoutRelsXml = await zip.files[layoutRelsKey]?.async('string') || '';
+            const masterTarget = layoutRelsXml.match(/Type="[^"]*slideMaster"[^>]*Target="([^"]+)"/i)?.[1];
+            if (masterTarget) {
+              const cleanMaster = masterTarget.replace(/^\.\.\//, 'ppt/');
+              const masterXml = await zip.files[cleanMaster]?.async('string') || '';
+              bg = resolveBgFromXml(masterXml);
+            }
+          }
+        }
+      }
+      backgrounds.push(bg);
+    }
+  } catch (err) {
+    console.warn("Could not extract PPTX slide backgrounds:", err);
+  }
+  return backgrounds;
+};
+
+// Extract shape coordinates and dimensions from inline CSS style
+const getShapeBoundsFromStyle = (style: string) => {
+  const left = parseFloat((style.match(/left:\s*([\d.]+)px/i) || [])[1] || '0');
+  const top = parseFloat((style.match(/top:\s*([\d.]+)px/i) || [])[1] || '0');
+  const width = parseFloat((style.match(/width:\s*([\d.]+)px/i) || [])[1] || '0');
+  const height = parseFloat((style.match(/height:\s*([\d.]+)px/i) || [])[1] || '0');
+  return { left, top, width, height, right: left + width, bottom: top + height };
+};
+
+// Automated slide contrast enhancer: ensures all text and diagrams are 100% visible on both light and dark slides
+// Detects full-bleed background shapes, underlay cards, and master themes to eliminate invisible text.
+const ensureSlideTextContrast = (
+  slideEl: Element,
+  inheritedBg?: string | null
+): string => {
+  // 1. Resolve slide's actual background
+  const slideStyle = slideEl.getAttribute('style') || '';
+  const bgMatch = slideStyle.match(/background(?:-color)?:\s*([^;]+)/i);
+  let effectiveSlideBg = bgMatch ? bgMatch[1].trim() : '';
+
+  // Collect all shapes to inspect underlays, full-bleed background rectangles, and cards
+  const allShapes = Array.from(slideEl.querySelectorAll('.shape'));
+  interface ShapeMeta {
+    el: Element;
+    index: number;
+    bounds: { left: number; top: number; width: number; height: number; right: number; bottom: number };
+    bgRgb: { r: number; g: number; b: number } | null;
+    bgStr: string | null;
+  }
+
+  const shapeMetas: ShapeMeta[] = allShapes.map((sEl, i) => {
+    const sStyle = sEl.getAttribute('style') || '';
+    const bounds = getShapeBoundsFromStyle(sStyle);
+    let bgRgb: { r: number; g: number; b: number } | null = null;
+    let bgStr: string | null = null;
+    const sBgMatch = sStyle.match(/background(?:-color)?:\s*([^;]+)/i);
+    if (sBgMatch) {
+      bgStr = sBgMatch[1].trim();
+      bgRgb = parseCssColorToRgb(bgStr);
+    }
+    if (!bgRgb) {
+      const svg = sEl.querySelector(':scope > svg.shape-svg, :scope > svg');
+      if (svg) {
+        const fillEl = svg.querySelector('[fill]:not([fill="none"]):not([fill="transparent"])');
+        if (fillEl) {
+          const fillVal = fillEl.getAttribute('fill');
+          if (fillVal) {
+            bgStr = fillVal;
+            bgRgb = parseCssColorToRgb(fillVal);
+          }
+        }
+      }
+    }
+    return { el: sEl, index: i, bounds, bgRgb, bgStr };
+  });
+
+  // Check for full-bleed background shape covering the slide (>= 75% width & height)
+  const fullSlideShape = shapeMetas.find(sh => sh.bounds.width >= 720 && sh.bounds.height >= 400 && (sh.bgRgb || sh.bgStr));
+  if (fullSlideShape) {
+    if (fullSlideShape.bgStr && fullSlideShape.bgStr.includes('gradient')) {
+      effectiveSlideBg = fullSlideShape.bgStr;
+      slideEl.setAttribute('style', `${slideStyle}; background: ${fullSlideShape.bgStr};`);
+    } else if (fullSlideShape.bgRgb) {
+      const hex = '#' + [fullSlideShape.bgRgb.r, fullSlideShape.bgRgb.g, fullSlideShape.bgRgb.b].map(v => v.toString(16).padStart(2, '0')).join('');
+      effectiveSlideBg = hex;
+      slideEl.setAttribute('style', `${slideStyle}; background-color: ${hex};`);
+    }
+  } else if (inheritedBg && (!effectiveSlideBg || effectiveSlideBg.toLowerCase() === '#ffffff' || effectiveSlideBg.toLowerCase() === '#fff' || effectiveSlideBg.toLowerCase() === 'white')) {
+    effectiveSlideBg = inheritedBg;
+    if (inheritedBg.includes('gradient')) {
+      slideEl.setAttribute('style', `${slideStyle}; background: ${inheritedBg};`);
+    } else {
+      slideEl.setAttribute('style', `${slideStyle}; background-color: ${inheritedBg};`);
+    }
+  }
+
+  // Check original text color distribution:
+  // If the slide's text is predominantly white/light (e.g. title, cards, boxes are all white),
+  // this slide was designed as a dark slide whose background failed to resolve from layout/master/gradient.
+  let totalLightChars = 0;
+  let totalDarkChars = 0;
+  const initialTextEls = slideEl.querySelectorAll('.run, .run-segment, p, span, .paragraph, h1, h2, h3, h4, h5, h6');
+  initialTextEls.forEach(tEl => {
+    const txt = tEl.textContent?.trim();
+    if (!txt) return;
+    const st = tEl.getAttribute('style') || '';
+    const colM = st.match(/(?:^|;)\s*color:\s*([^;]+)/i);
+    if (colM) {
+      const rgb = parseCssColorToRgb(colM[1]);
+      if (rgb) {
+        if (getRgbLuminance(rgb) > 0.6) {
+          totalLightChars += txt.length;
+        } else {
+          totalDarkChars += txt.length;
+        }
+      }
+    }
+  });
+
+  const isIntendedDarkSlide = totalLightChars > 0 && totalLightChars >= totalDarkChars;
+  if (isIntendedDarkSlide && (!effectiveSlideBg || effectiveSlideBg.toLowerCase() === '#ffffff' || effectiveSlideBg.toLowerCase() === '#fff' || effectiveSlideBg.toLowerCase() === 'white')) {
+    effectiveSlideBg = '#0f172a';
+    slideEl.setAttribute('style', `${slideStyle}; background-color: #0f172a;`);
+  }
+
+  if (!effectiveSlideBg) {
+    effectiveSlideBg = '#ffffff';
+  }
+
+  const slideBgRgb = parseCssColorToRgb(effectiveSlideBg) || { r: 255, g: 255, b: 255 };
+  const slideBgLum = getRgbLuminance(slideBgRgb);
+
+  // 2. Normalize text body containers to standard OpenXML line-height and bounding box
+  slideEl.querySelectorAll('.text-body').forEach(tb => {
+    const tbStyle = tb.getAttribute('style') || '';
+    tb.setAttribute('style', `${tbStyle}; box-sizing: border-box; line-height: 1.15; overflow-wrap: break-word; word-break: break-word;`);
+  });
+
+  // 3. Scan all text elements within the slide
+  const textCandidates = slideEl.querySelectorAll('.run, .run-segment, p, span, .paragraph, h1, h2, h3, h4, h5, h6, .text-body');
+
+  textCandidates.forEach((el) => {
+    // Only process elements that contain actual text
+    const text = el.textContent?.trim();
+    if (!text) return;
+
+    // Detect color of this text element (inline or inherited from ancestor)
+    let colorStr = '';
+    let curr: Element | null = el;
+    while (curr && curr !== slideEl) {
+      const style = curr.getAttribute('style') || '';
+      const cMatch = style.match(/(?:^|;)\s*color:\s*([^;]+)/i);
+      if (cMatch) {
+        colorStr = cMatch[1].trim();
+        break;
+      }
+      curr = curr.parentElement;
+    }
+
+    // In CSS, if an element has no explicit color, default browser text color is black (#000000)
+    const textRgb = colorStr ? parseCssColorToRgb(colorStr) : { r: 0, g: 0, b: 0 };
+    if (!textRgb) return;
+
+    // Determine the TRUE physical background behind this text element:
+    // First, check closest shape container or ancestors
+    let effectiveBgRgb = slideBgRgb;
+    const containingShape = el.closest('.shape');
+    const containingMeta = shapeMetas.find(s => s.el === containingShape);
+
+    if (containingMeta && containingMeta.bgRgb) {
+      effectiveBgRgb = containingMeta.bgRgb;
+    } else if (containingMeta) {
+      // If containing shape has no background, find the preceding shape in DOM order physically underneath its center
+      const centerX = containingMeta.bounds.left + containingMeta.bounds.width / 2;
+      const centerY = containingMeta.bounds.top + containingMeta.bounds.height / 2;
+      for (let j = containingMeta.index - 1; j >= 0; j--) {
+        const prev = shapeMetas[j];
+        if (prev.bgRgb && prev.bounds.left <= centerX && centerX <= prev.bounds.right &&
+            prev.bounds.top <= centerY && centerY <= prev.bounds.bottom) {
+          effectiveBgRgb = prev.bgRgb;
+          break;
+        }
+      }
+    } else {
+      let bgCurr: Element | null = el.parentElement;
+      while (bgCurr && bgCurr !== slideEl) {
+        const bStyle = bgCurr.getAttribute('style') || '';
+        const bMatch = bStyle.match(/background(?:-color)?:\s*([^;]+)/i);
+        if (bMatch) {
+          const parsed = parseCssColorToRgb(bMatch[1]);
+          if (parsed) {
+            effectiveBgRgb = parsed;
+            break;
+          }
+        }
+        bgCurr = bgCurr.parentElement;
+      }
+    }
+
+    // Calculate contrast ratio against effective background
+    const contrast = calculateContrastRatio(textRgb, effectiveBgRgb);
+    // If contrast is poor (< 3.5:1), text is invisible/washed out
+    if (contrast < 3.5) {
+      const bgLum = getRgbLuminance(effectiveBgRgb);
+      const currStyle = el.getAttribute('style') || '';
+      if (bgLum > 0.5) {
+        // Light background + light/invisible text => change text to high-contrast dark slate
+        const updatedStyle = currStyle.includes('color:')
+          ? currStyle.replace(/(?:^|;)\s*color:\s*[^;]+/gi, '; color: #1e293b !important')
+          : `${currStyle}; color: #1e293b !important;`;
+        el.setAttribute('style', updatedStyle);
+
+        // Also ensure child run-segments receive or inherit this color
+        el.querySelectorAll('.run-segment').forEach(child => {
+          const childStyle = child.getAttribute('style') || '';
+          if (childStyle.includes('color:')) {
+            child.setAttribute('style', childStyle.replace(/(?:^|;)\s*color:\s*[^;]+/gi, '; color: #1e293b !important'));
+          }
+        });
+
+        // Also check if parent element had an inline light color that might override
+        if (el.parentElement && el.parentElement !== slideEl) {
+          const pStyle = el.parentElement.getAttribute('style') || '';
+          if (pStyle.includes('color:')) {
+            const pMatch = pStyle.match(/(?:^|;)\s*color:\s*([^;]+)/i);
+            const pRgb = pMatch ? parseCssColorToRgb(pMatch[1]) : null;
+            if (pRgb && getRgbLuminance(pRgb) > 0.5) {
+              el.parentElement.setAttribute('style', pStyle.replace(/(?:^|;)\s*color:\s*[^;]+/gi, '; color: #1e293b !important'));
+            }
+          }
+        }
+      } else {
+        // Dark background + dark/invisible text => change text to high-contrast light
+        let updatedStyle = currStyle.includes('color:')
+          ? currStyle.replace(/(?:^|;)\s*color:\s*[^;]+/gi, '; color: #f8fafc !important')
+          : `${currStyle}; color: #f8fafc !important;`;
+        // Ensure opacity is fully visible
+        updatedStyle = updatedStyle.replace(/(?:^|;)\s*opacity:\s*[^;]+/gi, '; opacity: 1 !important');
+        el.setAttribute('style', updatedStyle);
+
+        // Also ensure child run-segments receive this light color
+        el.querySelectorAll('.run-segment').forEach(child => {
+          const childStyle = child.getAttribute('style') || '';
+          if (childStyle.includes('color:')) {
+            child.setAttribute('style', childStyle.replace(/(?:^|;)\s*color:\s*[^;]+/gi, '; color: #f8fafc !important'));
+          }
+        });
+
+        // Also check if parent element had an inline dark color that might override
+        if (el.parentElement && el.parentElement !== slideEl) {
+          const pStyle = el.parentElement.getAttribute('style') || '';
+          if (pStyle.includes('color:')) {
+            const pMatch = pStyle.match(/(?:^|;)\s*color:\s*([^;]+)/i);
+            const pRgb = pMatch ? parseCssColorToRgb(pMatch[1]) : null;
+            if (pRgb && getRgbLuminance(pRgb) < 0.45) {
+              el.parentElement.setAttribute('style', pStyle.replace(/(?:^|;)\s*color:\s*[^;]+/gi, '; color: #f8fafc !important'));
+            }
+          }
+        }
+      }
+    }
+  });
+
+  // 3. Scan SVG text elements (<text>, <tspan>)
+  const svgTexts = slideEl.querySelectorAll('text, tspan');
+  svgTexts.forEach((tEl) => {
+    const text = tEl.textContent?.trim();
+    if (!text) return;
+
+    let fillStr = tEl.getAttribute('fill') || '';
+    if (!fillStr) {
+      const style = tEl.getAttribute('style') || '';
+      const fMatch = style.match(/(?:^|;)\s*fill:\s*([^;]+)/i);
+      if (fMatch) fillStr = fMatch[1].trim();
+    }
+
+    const fillRgb = fillStr ? parseCssColorToRgb(fillStr) : { r: 0, g: 0, b: 0 };
+    if (fillRgb) {
+      const contrast = calculateContrastRatio(fillRgb, slideBgRgb);
+      if (contrast < 3.5) {
+        if (slideBgLum > 0.5) {
+          tEl.setAttribute('fill', '#1e293b');
+        } else {
+          tEl.setAttribute('fill', '#f8fafc');
+        }
+      }
+    }
+  });
+
+  // 4. Check for SVG diagram lines/connectors directly on slide background
+  if (slideBgLum > 0.6) {
+    const svgShapes = slideEl.querySelectorAll('path, line, polyline, polygon');
+    svgShapes.forEach((shape) => {
+      const stroke = shape.getAttribute('stroke');
+      if (stroke) {
+        const strokeRgb = parseCssColorToRgb(stroke);
+        if (strokeRgb && calculateContrastRatio(strokeRgb, slideBgRgb) < 2.0) {
+          shape.setAttribute('stroke', '#94a3b8');
+        }
+      }
+    });
+  }
+
+  return effectiveSlideBg;
+};
+
+// High-fidelity presentation loader: uses WASM engine for pixel-accurate slide rendering
+const loadPptPresentation = async (arrayBuffer: ArrayBuffer): Promise<any[]> => {
+  // 1. Primary engine: High-fidelity Rust/WASM presentation engine
+  try {
+    const { convert: convertPptx, convert_with_options: convertWithOptions, get_presentation_info: getPresInfo } = await ensurePptxEngine();
+    const data = new Uint8Array(arrayBuffer);
+
+    let presWidth = 960;
+    let presHeight = 540;
+    try {
+      if (typeof getPresInfo === 'function') {
+        const info = getPresInfo(data);
+        if (info && info.widthPx > 0 && info.heightPx > 0) {
+          presWidth = info.widthPx;
+          presHeight = info.heightPx;
+        }
+      }
+    } catch (infoErr) {
+      console.warn("Could not read presentation info:", infoErr);
+    }
+
+    // Extract slide backgrounds from OpenXML package in parallel
+    const pptxBackgrounds = await extractPptxSlideBackgrounds(arrayBuffer);
+
+    let htmlString = '';
+    if (typeof convertWithOptions === 'function') {
+      try {
+        htmlString = convertWithOptions(data, true, true, new Uint32Array([]), 1.0);
+      } catch (optErr) {
+        console.warn("convert_with_options failed, falling back to standard convert:", optErr);
+        htmlString = convertPptx(data);
+      }
+    } else {
+      htmlString = convertPptx(data);
+    }
+    if (htmlString && htmlString.includes('class="slide')) {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(htmlString, 'text/html');
+
+      let scopedCss = '';
+      const styleTag = doc.querySelector('style');
+      if (styleTag && styleTag.textContent) {
+        scopedCss = styleTag.textContent
+          .replace(/\bbody\s*\{[^}]*\}/gi, '')
+          .replace(/\*\s*\{[^}]*margin\s*:\s*0[^}]*\}/gi, '');
+      }
+
+      const slideShells = doc.querySelectorAll('.slide-shell');
+      if (slideShells.length > 0) {
+        const parsedSlides: any[] = [];
+        slideShells.forEach((shell, idx) => {
+          const slideEl = shell.querySelector('.slide') || shell;
+
+          const shellStyle = shell.getAttribute('style') || '';
+          const wMatch = shellStyle.match(/width:\s*([\d.]+)px/i);
+          const hMatch = shellStyle.match(/height:\s*([\d.]+)px/i);
+          const slideWidth = wMatch ? parseFloat(wMatch[1]) : presWidth;
+          const slideHeight = hMatch ? parseFloat(hMatch[1]) : presHeight;
+
+          // Ensure full text contrast and prevent white-on-white text masking
+          const inheritedBg = pptxBackgrounds[idx] || null;
+          const effectiveBgColor = ensureSlideTextContrast(slideEl, inheritedBg);
+
+          // Extract text runs for outline / accessibility / title
+          const textRuns: string[] = [];
+          slideEl.querySelectorAll('p, .paragraph, .run, .run-segment').forEach(node => {
+            const txt = node.textContent?.trim();
+            if (txt && !textRuns.includes(txt)) {
+              textRuns.push(txt);
+            }
+          });
+
+          const title = textRuns[0] || `Slide ${idx + 1}`;
+          const content = textRuns.slice(1);
+
+          const hasImages = !!slideEl.querySelector('img, svg, .shape-image');
+
+          parsedSlides.push({
+            slideIndex: idx,
+            title,
+            content: content.length > 0 ? content : (textRuns.length > 0 ? textRuns : [`Slide ${idx + 1}`]),
+            html: shell.outerHTML,
+            css: scopedCss,
+            width: slideWidth,
+            height: slideHeight,
+            backgroundColor: effectiveBgColor,
+            isHighFidelity: true,
+            elements: hasImages 
+              ? [{ type: 'image' }, { type: 'text', isTitle: true, text: title }] 
+              : [{ type: 'text', isTitle: true, text: title }]
+          });
+        });
+
+        if (parsedSlides.length > 0) {
+          console.log(`Successfully parsed ${parsedSlides.length} high-fidelity slides via WASM engine with contrast protection.`);
+          return parsedSlides;
+        }
+      }
+    }
+  } catch (wasmErr) {
+    console.warn("WASM presentation renderer failed, falling back to safe OpenXML parser:", wasmErr);
+  }
+
+  // 2. Safe Fallback OpenXML parser (with non-colliding layout)
+  return await parsePptx(arrayBuffer);
+};
+
+// Canvas page renderer for PDF with Persistent Page Cache & Progressive Preloading
 const PdfPageRenderer: React.FC<{ 
   pdfDoc: any; 
   pageNum: number; 
@@ -919,42 +1708,71 @@ const PdfPageRenderer: React.FC<{
 }> = ({ pdfDoc, pageNum, scale, containerWidth, isThumbnail = false }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [isVisible, setIsVisible] = useState(false);
+  const [pageAspect, setPageAspect] = useState<{ width: number; height: number }>({ width: 1, height: 1.414 });
+  // Pre-render the first 3 pages immediately
+  const [shouldRender, setShouldRender] = useState(() => pageNum <= 3);
+  const [rendered, setRendered] = useState(false);
   const [rendering, setRendering] = useState(false);
   const [errorRef, setErrorRef] = useState(false);
   const renderTaskRef = useRef<any>(null);
+  const lastRenderedScaleRef = useRef<number>(0);
 
-  // Lazy render pages using IntersectionObserver so only visible/near-viewport pages allocate canvas memory
+  // 1. Generous viewport observer: pre-renders 2-3 pages ahead of scroll
   useEffect(() => {
+    if (pageNum <= 3) {
+      setShouldRender(true);
+      return;
+    }
+
     const el = containerRef.current;
     if (!el) return;
 
-    // Use IntersectionObserver with a generous rootMargin so pages pre-render before scrolling into view
+    // Generous rootMargin (1800px) so upcoming pages are rendered well before reaching viewport
     const observer = new IntersectionObserver(
       (entries) => {
         entries.forEach((entry) => {
           if (entry.isIntersecting) {
-            setIsVisible(true);
-          } else if (!isThumbnail) {
-            // Free canvas bitmap when scrolled far off-screen to prevent mobile OOM crashes
-            setIsVisible(false);
+            setShouldRender(true);
           }
+          // IMPORTANT: Never unload previously rendered pages when scrolling away!
+          // Keeping rendered pages in DOM guarantees instant scrolling with zero reload spinners.
         });
       },
-      { rootMargin: isThumbnail ? '100px 0px' : '400px 0px' }
+      { rootMargin: isThumbnail ? '400px 0px' : '1800px 0px' }
     );
 
     observer.observe(el);
     return () => {
       observer.disconnect();
     };
-  }, [isThumbnail]);
+  }, [pageNum, isThumbnail]);
 
+  // 2. Background progressive preloader: after page N finishes rendering, queue page N+1 to render in idle time
   useEffect(() => {
-    if (!isVisible) {
-      if (renderTaskRef.current) {
-        renderTaskRef.current.cancel();
+    const handleNextPageQueue = (e: Event) => {
+      const finishedPage = (e as CustomEvent)?.detail?.pageNum;
+      if (finishedPage === pageNum - 1) {
+        // Queue next page render in idle time or shortly after previous page finishes
+        const timer = setTimeout(() => {
+          setShouldRender(true);
+        }, 100);
+        return () => clearTimeout(timer);
       }
+    };
+
+    window.addEventListener('pdf:page-rendered', handleNextPageQueue);
+    return () => {
+      window.removeEventListener('pdf:page-rendered', handleNextPageQueue);
+    };
+  }, [pageNum]);
+
+  // 3. Render page onto canvas
+  useEffect(() => {
+    if (!shouldRender) return;
+
+    // If already rendered at the same scale, don't re-render
+    const effectiveScale = scale;
+    if (rendered && lastRenderedScaleRef.current === effectiveScale) {
       return;
     }
 
@@ -976,16 +1794,19 @@ const PdfPageRenderer: React.FC<{
         // Balanced zoom multiplier: 1.0 for thumbnail, 1.25 for regular pages
         const zoomMultiplier = isThumbnail ? 1.0 : 1.25;
         const baseViewport = page.getViewport({ scale: 1 });
-        const widthScale = containerWidth > 0 ? (containerWidth / baseViewport.width) : 1;
+        setPageAspect({ width: baseViewport.width, height: baseViewport.height });
+
+        const effectiveWidth = Math.max(containerWidth || 500, 480);
+        const widthScale = effectiveWidth / baseViewport.width;
         const finalScale = widthScale * scale * zoomMultiplier;
         const viewport = page.getViewport({ scale: finalScale });
 
-        // Cap DPR to 2 max to prevent massive canvas memory allocations on 3x-4x mobile screens
+        // Cap DPR to 2 max to prevent massive canvas memory allocations on mobile screens
         const dpr = Math.min(window.devicePixelRatio || 1, 2);
-        canvas.width = viewport.width * dpr;
-        canvas.height = viewport.height * dpr;
-        canvas.style.width = `${viewport.width / zoomMultiplier}px`;
-        canvas.style.height = `${viewport.height / zoomMultiplier}px`;
+        canvas.width = Math.floor(viewport.width * dpr);
+        canvas.height = Math.floor(viewport.height * dpr);
+        canvas.style.width = '100%';
+        canvas.style.height = '100%';
 
         context.scale(dpr, dpr);
 
@@ -1001,12 +1822,24 @@ const PdfPageRenderer: React.FC<{
         const renderTask = page.render(renderContext);
         renderTaskRef.current = renderTask;
         await renderTask.promise;
-        setRendering(false);
+
+        if (active) {
+          setRendering(false);
+          setRendered(true);
+          lastRenderedScaleRef.current = effectiveScale;
+
+          // Dispatch event to sequentially trigger the next page in background
+          window.dispatchEvent(
+            new CustomEvent('pdf:page-rendered', { detail: { pageNum } })
+          );
+        }
       } catch (err: any) {
         if (err.name !== 'RenderingCancelledException') {
           console.error(`Page ${pageNum} render task failed/cancelled`, err);
-          setErrorRef(true);
-          setRendering(false);
+          if (active) {
+            setErrorRef(true);
+            setRendering(false);
+          }
         }
       }
     };
@@ -1019,26 +1852,22 @@ const PdfPageRenderer: React.FC<{
         renderTaskRef.current.cancel();
       }
     };
-  }, [isVisible, pdfDoc, pageNum, scale, containerWidth, isThumbnail]);
+  }, [shouldRender, pdfDoc, pageNum, scale, containerWidth, isThumbnail, rendered]);
 
   if (isThumbnail) {
     return (
-      <div ref={containerRef} className="relative w-full h-full flex items-center justify-center overflow-hidden bg-white">
-        {isVisible ? (
-          <>
-            {rendering && (
-              <div className="absolute inset-0 flex items-center justify-center bg-white/50 backdrop-blur-[1px] z-10">
-                <Loader2 size={16} className="text-blue-600 animate-spin" />
-              </div>
-            )}
-            {errorRef ? (
-              <div className="text-[10px] text-red-500 font-bold p-1">Error</div>
-            ) : (
-              <canvas ref={canvasRef} className="max-h-full max-w-full object-contain" />
-            )}
-          </>
-        ) : (
-          <div className="w-full h-full bg-neutral-100 flex items-center justify-center">
+      <div ref={containerRef} className="relative w-full h-full flex items-center justify-center overflow-hidden bg-white rounded-none">
+        <canvas 
+          ref={canvasRef} 
+          className={`max-h-full max-w-full object-contain rounded-none transition-opacity duration-200 ${rendered ? 'opacity-100' : 'opacity-0'}`} 
+        />
+        {(!rendered && rendering) && (
+          <div className="absolute inset-0 flex items-center justify-center bg-white/50 backdrop-blur-[1px] z-10 rounded-none">
+            <Loader2 size={16} className="text-blue-600 animate-spin" />
+          </div>
+        )}
+        {!shouldRender && !rendered && (
+          <div className="w-full h-full bg-neutral-100 flex items-center justify-center rounded-none">
             <span className="text-[10px] text-neutral-400 font-mono">{pageNum}</span>
           </div>
         )}
@@ -1049,41 +1878,45 @@ const PdfPageRenderer: React.FC<{
   return (
     <div 
       ref={containerRef} 
-      className="bg-white p-1 sm:p-3 border border-neutral-200/70 shadow-sm rounded-lg sm:rounded-xl flex flex-col items-center justify-center min-h-[320px] sm:min-h-[420px] relative w-full mb-4 sm:mb-6 max-w-lg mx-auto overflow-hidden"
+      style={{
+        aspectRatio: `${pageAspect.width} / ${pageAspect.height}`,
+      }}
+      className="bg-white p-0 border border-neutral-300 shadow-[0_4px_16px_rgba(0,0,0,0.12)] rounded-none relative w-full overflow-hidden select-none"
     >
-      {isVisible ? (
+      {shouldRender ? (
         <>
-          {rendering && (
-            <div className="absolute inset-0 flex items-center justify-center bg-white/50 backdrop-blur-[1px] z-10 rounded-lg sm:rounded-xl border border-neutral-200/70">
+          {rendering && !rendered && (
+            <div className="absolute inset-0 flex items-center justify-center bg-white/70 backdrop-blur-xs z-10 rounded-none">
               <Loader2 size={24} className="text-blue-600 animate-spin" />
             </div>
           )}
           {errorRef ? (
-            <div className="text-sm text-red-500 font-medium font-sans py-8">Failed to display Page {pageNum}</div>
+            <div className="w-full h-full flex items-center justify-center text-xs text-red-500 font-medium font-sans">
+              Failed to display Page {pageNum}
+            </div>
           ) : (
-            <canvas ref={canvasRef} className="max-w-full rounded-lg sm:rounded-xl w-full" />
+            <canvas 
+              ref={canvasRef} 
+              className={`w-full h-full object-contain rounded-none block transition-opacity duration-150 ${rendered ? 'opacity-100' : 'opacity-0'}`} 
+            />
           )}
-          <div className="mt-2.5 mb-1 text-[10px] text-neutral-400 font-bold uppercase tracking-widest font-mono select-none">
-            Page {pageNum} of {pdfDoc.numPages}
-          </div>
         </>
       ) : (
-        <div className="flex flex-col items-center justify-center h-[320px] text-neutral-300">
-          <Loader2 size={20} className="animate-spin text-neutral-300 mb-2" />
-          <span className="text-xs font-mono font-medium">Page {pageNum}</span>
+        <div className="w-full h-full bg-white flex flex-col items-center justify-center text-neutral-300">
+          <Loader2 size={20} className="animate-spin text-neutral-300 mb-1" />
+          <span className="text-[11px] font-mono font-medium text-neutral-400">{pageNum}</span>
         </div>
       )}
+      {/* Subtle floating page indicator at bottom right of page sheet */}
+      <span className="absolute bottom-1.5 right-2 text-[9px] font-mono font-bold text-neutral-400/85 bg-white/90 backdrop-blur-xs px-1.5 py-0.5 rounded shadow-2xs pointer-events-none select-none">
+        {pageNum}
+      </span>
     </div>
   );
 };
 
 // Word DOCX display
-const WordDocxViewer: React.FC<{ 
-  arrayBuffer: ArrayBuffer; 
-  htmlContent: string | null;
-  onSwitchToHighFidelity?: () => void;
-  isConverting?: boolean;
-}> = ({ arrayBuffer, htmlContent, onSwitchToHighFidelity, isConverting }) => {
+const WordDocxViewer: React.FC<{ arrayBuffer: ArrayBuffer; htmlContent: string | null }> = ({ arrayBuffer, htmlContent }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const parentRef = useRef<HTMLDivElement>(null);
   const [rendered, setRendered] = useState(false);
@@ -1385,10 +2218,22 @@ const WordDocxViewer: React.FC<{
                 const parent = container.querySelector('.docx-wrapper') || container;
                 const sections = parent.querySelectorAll('section');
                 
-                if (sections.length > 0) {
-                  setPageCount(sections.length);
+                let needsPartitioning = false;
+                sections.forEach((s) => {
+                  const sSect = s as HTMLElement;
+                  if (sSect && (sSect.scrollHeight > 1300 || sSect.offsetHeight > 1300)) {
+                    needsPartitioning = true;
+                  }
+                });
+
+                if (needsPartitioning) {
+                  partitionLongSections(container);
                 } else {
-                  setPageCount(1);
+                  if (sections.length > 0) {
+                    setPageCount(sections.length);
+                  } else {
+                    setPageCount(1);
+                  }
                 }
                 setRendered(true);
               }
@@ -1479,7 +2324,7 @@ const WordDocxViewer: React.FC<{
   if (useFallback && htmlContent) {
     return (
       <div 
-        className="w-full bg-white shadow-none sm:shadow-md p-4 sm:p-8 border-y sm:border border-neutral-200/80 prose prose-neutral max-w-none sm:max-w-3xl prose-xs sm:prose-sm md:prose-base rounded-none sm:rounded-2xl mx-auto my-0 sm:my-4 transition-all overflow-x-hidden" 
+        className="w-full bg-white shadow-none sm:shadow-md p-4 sm:p-8 border-y sm:border border-neutral-200/80 prose prose-neutral max-w-none sm:max-w-3xl prose-xs sm:prose-sm md:prose-base rounded-none mx-auto my-0 sm:my-4 transition-all overflow-x-hidden" 
         dangerouslySetInnerHTML={{ __html: htmlContent }} 
       />
     );
@@ -1527,7 +2372,7 @@ const WordDocxViewer: React.FC<{
           margin: 0 auto 32px auto !important; /* Center with generous spacing between physical pages */
           padding: 65px 85px !important; /* Elegant 1-inch standard Word doc margins */
           background-color: #ffffff !important;
-          border-radius: 4px !important; /* Sharp crisp paper cut styling */
+          border-radius: 0px !important; /* Sharp crisp square A4 paper styling */
           border: 1px solid #d4d4d8 !important; /* Soft paper outline border */
           box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.05) !important; /* High-end physical paper double shadow */
           position: relative !important;
@@ -1605,30 +2450,6 @@ const WordDocxViewer: React.FC<{
         </div>
       )}
 
-      {onSwitchToHighFidelity && (
-        <div className="max-w-4xl mx-auto px-4 mb-4">
-          <div className="bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-200/80 rounded-2xl p-4 shadow-sm flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-amber-500/10 flex items-center justify-center text-amber-600 shrink-0">
-                <Sparkles size={20} className="animate-pulse" />
-              </div>
-              <div>
-                <h4 className="font-bold text-sm text-neutral-900">Exact A4 Layout (LibreOffice)</h4>
-                <p className="text-xs text-neutral-500 font-medium">Render with 100% font accuracy, exact symbols, and true A4 page margins.</p>
-              </div>
-            </div>
-            <button
-              onClick={onSwitchToHighFidelity}
-              disabled={isConverting}
-              className="px-4 py-2.5 bg-amber-500 hover:bg-amber-600 active:scale-95 text-white text-xs font-bold rounded-xl shadow-sm transition-all shrink-0 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-            >
-              <Sparkles size={14} />
-              <span>{isConverting ? "Converting..." : "View Perfect A4"}</span>
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* Dynamic scaled container to achieve pixel-perfect desktop layouts fitted to mobile screen sizes */}
       <div 
         style={{ 
@@ -1654,24 +2475,15 @@ const WordDocxViewer: React.FC<{
   );
 };
 
-const getContrastTextColor = (hexColor: string) => {
-  if (!hexColor || !hexColor.startsWith('#')) return '#1e293b';
+const getContrastTextColor = (colorStr: string) => {
+  if (!colorStr) return '#1e293b';
   try {
-    const cleanHex = hexColor.trim();
-    if (cleanHex.length === 4) {
-      const r = parseInt(cleanHex[1] + cleanHex[1], 16);
-      const g = parseInt(cleanHex[2] + cleanHex[2], 16);
-      const b = parseInt(cleanHex[3] + cleanHex[3], 16);
-      return (r * 299 + g * 587 + b * 114) / 1000 > 128 ? '#1e293b' : '#f8fafc';
-    } else if (cleanHex.length === 7) {
-      const r = parseInt(cleanHex.slice(1, 3), 16);
-      const g = parseInt(cleanHex.slice(3, 5), 16);
-      const b = parseInt(cleanHex.slice(5, 7), 16);
-      if (isNaN(r) || isNaN(g) || isNaN(b)) return '#1e293b';
-      return (r * 299 + g * 587 + b * 114) / 1000 > 128 ? '#1e293b' : '#f8fafc';
+    const rgb = parseCssColorToRgb(colorStr);
+    if (rgb) {
+      return (rgb.r * 299 + rgb.g * 587 + rgb.b * 114) / 1000 > 128 ? '#1e293b' : '#f8fafc';
     }
   } catch (e) {
-    console.warn("Error calculating hex contrast", e);
+    console.warn("Error calculating color contrast", e);
   }
   return '#1e293b';
 };
@@ -2110,6 +2922,16 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
       return;
     }
 
+    if (!isOnlineSync()) {
+      triggerOfflineAlert();
+      return;
+    }
+    const online = await checkIsOnline();
+    if (!online) {
+      triggerOfflineAlert();
+      return;
+    }
+
     setConversionStatus('converting');
     setIsConverting(true);
     setConError(null);
@@ -2250,11 +3072,7 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
           docxContainer.appendChild(style);
         }
       } else if (extension === 'ppt' || extension === 'pptx') {
-        const initPptx = (await import('@briank-dev/pptx2html-turbo')).default;
-        const convertPptx = (await import('@briank-dev/pptx2html-turbo')).convert;
-        // @ts-ignore
-        const pptxWasmUrl = (await import('../../node_modules/@briank-dev/pptx2html-turbo/pptx2html_wasm_bg.wasm?url')).default;
-        await initPptx(pptxWasmUrl);
+        const { convert: convertPptx } = await ensurePptxEngine();
         const data = new Uint8Array(arrayBuffer);
         const htmlString = convertPptx(data);
         
@@ -2428,6 +3246,16 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
   };
 
   const handleConvertToPdfAndSave = async () => {
+    if (!isOnlineSync()) {
+      triggerOfflineAlert();
+      return;
+    }
+    const online = await checkIsOnline();
+    if (!online) {
+      triggerOfflineAlert();
+      return;
+    }
+
     setConversionStatus('converting');
     setIsConverting(true);
     setConError(null);
@@ -2479,13 +3307,17 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
       setSavedFileId(pdfFileId);
       setConversionStatus('success');
 
-      // Trigger auto-download
-      const a = document.createElement('a');
-      a.href = pdfDocMeta.url;
-      a.download = pdfFileName;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+      // Trigger auto-download to Downloads folder
+      if (Capacitor.isNativePlatform()) {
+        await downloadDocumentFile(pdfDocMeta, undefined, pdfBlob);
+      } else {
+        const a = document.createElement('a');
+        a.href = pdfDocMeta.url;
+        a.download = pdfFileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }
 
     } catch (err: any) {
       console.error("Convert and Save as PDF failed:", err);
@@ -2923,7 +3755,7 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
           }
         } else if (file.type === 'ppt') {
           try {
-            const parsedSlides = await parsePptx(arrayBuffer);
+            const parsedSlides = await loadPptPresentation(arrayBuffer);
             setSlides(parsedSlides);
             if (parsedSlides.length === 0) {
               // Try constructing simple presentation data
@@ -3240,7 +4072,7 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
     if (isHighFidelityMode && highFidelityPdf?.doc) {
       const pages = Array.from({ length: highFidelityPdf.pagesCount }, (_, i) => i + 1);
       return (
-        <div className="w-full h-full flex flex-col relative bg-neutral-100 animate-fade-in">
+        <div className="w-full h-full flex flex-col relative bg-[#e8ebf0] dark:bg-neutral-900 animate-fade-in">
           {/* Zoom controls bar */}
           <div className="bg-white border-b border-neutral-200 px-4 py-2 flex flex-wrap gap-2 justify-between items-center z-20 shadow-sm shrink-0">
             <div className="flex items-center gap-2">
@@ -3316,9 +4148,9 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
                           }
                         }, 150);
                       }}
-                      className="ring-1 ring-neutral-200/85 bg-white hover:ring-2 hover:ring-blue-600 rounded-2xl p-3 flex flex-col items-center justify-between text-center relative transition-all duration-300 shadow-sm group hover:scale-[1.03] hover:shadow-md"
+                      className="ring-1 ring-neutral-200/85 bg-white hover:ring-2 hover:ring-blue-600 rounded-none p-2 flex flex-col items-center justify-between text-center relative transition-all duration-300 shadow-sm group hover:scale-[1.03] hover:shadow-md cursor-pointer"
                     >
-                      <div className="w-full aspect-[3/4] overflow-hidden rounded-xl relative bg-neutral-50 flex items-center justify-center p-1.5 border border-neutral-100">
+                      <div className="w-full aspect-[1/1.414] overflow-hidden rounded-none relative bg-white flex items-center justify-center p-0 border border-neutral-300 shadow-xs">
                         <PdfPageRenderer 
                           pdfDoc={highFidelityPdf.doc} 
                           pageNum={num} 
@@ -3327,7 +4159,7 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
                           isThumbnail={true}
                         />
                       </div>
-                      <span className="text-xs font-bold text-neutral-500 mt-2.5 font-mono group-hover:text-blue-600">
+                      <span className="text-xs font-bold text-neutral-500 mt-2 font-mono group-hover:text-blue-600">
                         {t('page')} {num}
                       </span>
                     </button>
@@ -3336,18 +4168,18 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
               </div>
             );
           })() : (
-            <div className="flex-1 overflow-y-auto px-2 sm:px-4 py-4 sm:py-6 scroll-smooth bg-neutral-100">
+            <PdfZoomStripContainer resetDependency={`${file.id}-high-fidelity`}>
               {pages.map(num => (
-                <div key={num} id={`pdf-page-${num}`}>
+                <div key={num} id={`pdf-page-${num}`} className="w-full flex justify-center">
                   <PdfPageRenderer 
                     pdfDoc={highFidelityPdf.doc} 
                     pageNum={num} 
-                    scale={highFidelityPdf.zoom} 
+                    scale={1.0} 
                     containerWidth={containerWidth} 
                   />
                 </div>
               ))}
-            </div>
+            </PdfZoomStripContainer>
           )}
 
           <div className="p-4 bg-white border-t border-neutral-200 flex items-center shrink-0">
@@ -3418,7 +4250,7 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
     if (file.type === 'pdf' && pdfDoc) {
       const pages = Array.from({ length: pdfPagesCount }, (_, i) => i + 1);
       return (
-        <div className="w-full h-full flex flex-col relative bg-neutral-100">
+        <div className="w-full h-full flex flex-col relative bg-[#e8ebf0] dark:bg-neutral-900">
           {/* Zoom controls bar */}
           <div className="bg-white border-b border-neutral-200 px-4 py-2 flex flex-wrap gap-2 justify-between items-center z-20 shadow-sm shrink-0">
             <span className="text-xs font-bold text-neutral-500 font-mono tracking-tight">
@@ -3491,9 +4323,9 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
                           }
                         }, 150);
                       }}
-                      className="ring-1 ring-neutral-200/85 bg-white hover:ring-2 hover:ring-blue-600 rounded-2xl p-3 flex flex-col items-center justify-between text-center relative transition-all duration-300 shadow-sm group hover:scale-[1.03] hover:shadow-md"
+                      className="ring-1 ring-neutral-200/85 bg-white hover:ring-2 hover:ring-blue-600 rounded-none p-2 flex flex-col items-center justify-between text-center relative transition-all duration-300 shadow-sm group hover:scale-[1.03] hover:shadow-md cursor-pointer"
                     >
-                      <div className="w-full aspect-[3/4] overflow-hidden rounded-xl relative bg-neutral-50 flex items-center justify-center p-1.5 border border-neutral-100">
+                      <div className="w-full aspect-[1/1.414] overflow-hidden rounded-none relative bg-white flex items-center justify-center p-0 border border-neutral-300 shadow-xs">
                         <PdfPageRenderer 
                           pdfDoc={pdfDoc} 
                           pageNum={num} 
@@ -3502,7 +4334,7 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
                           isThumbnail={true}
                         />
                       </div>
-                      <span className="text-xs font-bold text-neutral-500 mt-2.5 font-mono group-hover:text-blue-600">
+                      <span className="text-xs font-bold text-neutral-500 mt-2 font-mono group-hover:text-blue-600">
                         {t('page')} {num}
                       </span>
                     </button>
@@ -3511,20 +4343,18 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
               </div>
             );
           })() : (
-            <ZoomPanContainer className="flex-1 overflow-hidden relative bg-neutral-100" resetDependency={file.id}>
-              <div className="w-full h-full overflow-y-auto px-2 sm:px-4 py-4 sm:py-6 scroll-smooth">
-                {pages.map(num => (
-                  <div key={num} id={`pdf-page-${num}`}>
-                    <PdfPageRenderer 
-                      pdfDoc={pdfDoc} 
-                      pageNum={num} 
-                      scale={pdfZoom} 
-                      containerWidth={containerWidth} 
-                    />
-                  </div>
-                ))}
-              </div>
-            </ZoomPanContainer>
+            <PdfZoomStripContainer resetDependency={file.id}>
+              {pages.map(num => (
+                <div key={num} id={`pdf-page-${num}`} className="w-full flex justify-center">
+                  <PdfPageRenderer 
+                    pdfDoc={pdfDoc} 
+                    pageNum={num} 
+                    scale={1.0} 
+                    containerWidth={containerWidth} 
+                  />
+                </div>
+              ))}
+            </PdfZoomStripContainer>
           )}
 
           <div className="p-4 bg-white border-t border-neutral-200 flex items-center shrink-0">
@@ -3584,12 +4414,7 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
         <div className="w-full h-full flex flex-col bg-neutral-150 overflow-hidden">
           <ZoomPanContainer className="flex-1 overflow-hidden relative bg-neutral-50" resetDependency={file.id}>
             <div className="w-full h-full overflow-y-auto bg-neutral-50 py-6">
-              <WordDocxViewer 
-                arrayBuffer={fileArrayBuffer} 
-                htmlContent={htmlContent}
-                onSwitchToHighFidelity={handleHighFidelityToggle}
-                isConverting={isConverting}
-              />
+              <WordDocxViewer arrayBuffer={fileArrayBuffer} htmlContent={htmlContent} />
             </div>
           </ZoomPanContainer>
           
@@ -3604,199 +4429,38 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
     }
     // Advanced Multi-Sheet Excel Spreadsheet Viewer
     if (file.type === 'xlsx' && excelData) {
-      const q = excelSearchQuery.toLowerCase().trim();
-      const rowsWithKey = excelData.map((row, originalIdx) => ({ row, originalIdx }));
-      const filteredExcelRows = q
-        ? rowsWithKey.filter(({ row, originalIdx }) => {
-            if (originalIdx === 0) return true; // Keep headers visible
-            return row.some(cell => {
-              if (cell === null || cell === undefined) return false;
-              return String(cell).toLowerCase().includes(q);
-            });
-          })
-        : rowsWithKey;
-
-      const totalPages = 1;
-      const paginatedRows = filteredExcelRows.slice(0, visibleRowsCount);
-
-      const renderCellWithHighlight = (value: string) => {
-        if (!q) return value;
-        try {
-          const escapedQuery = excelSearchQuery.trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-          const parts = value.split(new RegExp(`(${escapedQuery})`, 'gi'));
-          return (
-            <>
-              {parts.map((part, index) => 
-                part.toLowerCase() === q ? (
-                  <mark key={index} className="bg-yellow-200 text-yellow-950 font-bold px-0.5 rounded-[3px] border border-yellow-300">
-                    {part}
-                  </mark>
-                ) : (
-                  part
-                )
-              )}
-            </>
-          );
-        } catch {
-          return value;
-        }
-      };
-
-      const handleExcelScroll = (e: React.UIEvent<HTMLDivElement>) => {
-        const target = e.currentTarget;
-        if (target.scrollHeight - target.scrollTop - target.clientHeight < 150) {
-          setVisibleRowsCount(prev => Math.min(prev + 200, filteredExcelRows.length));
-        }
-      };
-
       return (
-        <div className="h-full bg-white flex flex-col overflow-hidden">
-          {/* Worksheets sheet selection tabs styled precisely like tabs */}
-          <div className="border-b border-neutral-200 bg-neutral-50 px-4 py-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0 select-none">
-            <div className="flex items-center gap-2 overflow-x-auto scrollbar-none py-1 flex-1">
-              <span className="text-[10px] font-black uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2 py-1 rounded border border-emerald-100 shrink-0">
-                {t('sheets')}
-              </span>
-              {sheetNames.map(name => (
-                <button
-                  key={name}
-                  onClick={() => handleSheetSelect(name)}
-                  className={`px-3 py-1 text-xs font-bold rounded-lg transition-all border whitespace-nowrap shrink-0 ${
-                    currentSheet === name 
-                      ? "bg-emerald-600 border-emerald-600 text-white shadow-sm"
-                      : "bg-white border-neutral-200 text-neutral-600 hover:bg-neutral-50"
-                  }`}
-                >
-                  {name}
-                </button>
-              ))}
-            </div>
-
-            {/* Premium Excel Search Bar */}
-            <div className="relative w-full sm:w-64">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-400" size={13} />
-              <input
-                type="text"
-                placeholder={t('searchPlaceholder') || "Search in sheet..."}
-                value={excelSearchQuery}
-                onChange={(e) => setExcelSearchQuery(e.target.value)}
-                className="w-full bg-white border border-neutral-200 focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500 rounded-lg pl-8 pr-7 py-1 text-xs text-neutral-800 placeholder-neutral-300 outline-none transition-all"
-              />
-              {excelSearchQuery && (
-                <button
-                  onClick={() => setExcelSearchQuery('')}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600 p-0.5 transition-colors"
-                >
-                  <X size={11} />
-                </button>
-              )}
-            </div>
-
-            <div className="hidden sm:flex items-center gap-2 text-[10px] font-bold text-neutral-400 font-mono uppercase tracking-wider">
-              {excelSearchQuery ? (
-                <span className="text-emerald-700 bg-emerald-50 border border-emerald-100 px-1.5 py-0.5 rounded text-[9px] font-black uppercase">
-                  Found {filteredExcelRows.length - 1} / {excelData.length - 1}
-                </span>
-              ) : (
-                <span>{excelData.length} {t('rows')}</span>
-              )}
-            </div>
-          </div>
-          
-          {/* Scrollable grid area with sticky headers */}
-          <ZoomPanContainer className="flex-1 overflow-hidden relative bg-neutral-100" resetDependency={`${file.id}-${currentSheet}`}>
-            <div className="w-full h-full overflow-auto p-4" onScroll={handleExcelScroll}>
-              <div className="border border-neutral-300 rounded-xl overflow-hidden shadow-sm bg-white inline-block min-w-full">
-                <table className="w-full text-xs text-left border-collapse table-fixed">
-                  <thead className="sticky top-0 z-20 bg-neutral-200 select-none shadow-sm">
-                    <tr>
-                      <th className="px-3 py-1.5 border-r border-b border-neutral-300 font-bold text-neutral-500 text-center w-14 bg-neutral-150 sticky left-0 z-30 font-mono text-[10px]">
-                        #
-                      </th>
-                      {excelData[0]?.map((_, idx) => (
-                        <th 
-                          key={idx} 
-                          className="px-4 py-1.5 border-r border-b border-neutral-300 font-bold text-neutral-600 w-36 bg-neutral-200 text-center uppercase font-mono text-[11px]"
-                        >
-                          {getExcelColName(idx)}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-neutral-200">
-                    {paginatedRows.map(({ row, originalIdx }) => (
-                      <tr 
-                        key={originalIdx} 
-                        className={`hover:bg-neutral-50/80 transition-colors ${
-                          originalIdx % 2 === 0 ? 'bg-white' : 'bg-neutral-50/30'
-                        }`}
-                      >
-                        {/* Row index label */}
-                        <td className="px-3 py-2 border-r border-neutral-200 text-neutral-400 text-center select-none bg-neutral-50/70 font-mono text-[10px] font-bold sticky left-0 z-10 shadow-[2px_0_5px_rgba(0,0,0,0.02)]">
-                          {originalIdx + 1}
-                        </td>
-                        {row.map((cell, cellIdx) => {
-                          const cellStrVal = cell !== null && cell !== undefined ? String(cell) : '';
-                          const alignmentClass = getExcelAlignmentClass(cell);
-                          return (
-                            <td 
-                              key={cellIdx} 
-                              className={`px-4 py-2 border-r border-b border-neutral-200 text-neutral-800 min-w-[144px] max-w-xl whitespace-normal break-words font-medium ${alignmentClass}`}
-                              title={cellStrVal}
-                            >
-                              {renderCellWithHighlight(cellStrVal)}
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </ZoomPanContainer>
-
-          <div className="p-4 bg-white border-t border-neutral-200 flex items-center justify-between shrink-0">
-             <div className="flex items-center gap-2 text-neutral-600 font-sans">
-                <FileSpreadsheet size={18} className="text-emerald-600 animate-pulse animate-duration-3000" />
-                <span className="text-xs font-bold truncate max-w-[175px] sm:max-w-md">{file.name}</span>
-             </div>
-             {totalPages > 1 && (
-               <div className="flex items-center gap-2 select-none">
-                 <button
-                   disabled={excelPage === 1}
-                   onClick={() => setExcelPage(prev => Math.max(1, prev - 1))}
-                   className="px-2.5 py-1 text-xs font-bold bg-white hover:bg-neutral-50 text-neutral-700 border border-neutral-200 rounded-lg disabled:opacity-50 transition-all active:scale-95 cursor-pointer shadow-sm"
-                 >
-                   Previous
-                 </button>
-                 <span className="text-xs font-semibold text-neutral-500 font-mono">
-                   Page {excelPage} of {totalPages}
-                 </span>
-                 <button
-                   disabled={excelPage === totalPages}
-                   onClick={() => setExcelPage(prev => Math.min(totalPages, prev + 1))}
-                   className="px-2.5 py-1 text-xs font-bold bg-white hover:bg-neutral-50 text-neutral-700 border border-neutral-200 rounded-lg disabled:opacity-50 transition-all active:scale-95 cursor-pointer shadow-sm"
-                 >
-                   Next
-                 </button>
-               </div>
-             )}
-          </div>
-        </div>
+        <ExcelSpreadsheetViewer 
+          excelData={excelData}
+          sheetNames={sheetNames}
+          currentSheet={currentSheet}
+          onSheetSelect={handleSheetSelect}
+          fileName={file.name}
+          fileId={file.id}
+          t={t}
+        />
       );
     }
 
     // Creative PowerPoint PPT/PPTX Slide Presentation Deck Viewer
     if (file.type === 'ppt' && slides.length > 0) {
-      const activeSlide = slides[currentSlideIdx];
-      const contrastColor = getContrastTextColor(activeSlide.backgroundColor || '#ffffff');
+      const activeSlide = slides[currentSlideIdx] || slides[0];
+      const contrastColor = getContrastTextColor(activeSlide?.backgroundColor || '#ffffff');
 
       // Proportional aspect-ratio layout sizing calculated dynamically based on container workspace scale factor
       const isMobileLayout = containerWidth < 768;
       const spaceTakenBySidebar = isMobileLayout ? 0 : 256;
       const availableSlideSpace = Math.max(280, containerWidth - spaceTakenBySidebar);
-      const scaleFactor = Math.min(availableSlideSpace, 768) / 768;
+
+      const slideNativeWidth = activeSlide?.width || 960;
+      const slideNativeHeight = activeSlide?.height || 540;
+      const slideAspect = slideNativeWidth / slideNativeHeight;
+
+      // Fit container nicely on both mobile and desktop screens
+      const targetCanvasWidth = Math.min(availableSlideSpace - (isMobileLayout ? 16 : 48), 960);
+      const canvasBoxWidth = Math.max(280, targetCanvasWidth);
+      const canvasBoxHeight = canvasBoxWidth / slideAspect;
+      const scaleFactor = canvasBoxWidth / slideNativeWidth;
 
       return (
         <div className="w-full h-full flex flex-col bg-neutral-900 select-none overflow-hidden">
@@ -3955,8 +4619,8 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
               <div className="flex-1 flex items-center justify-center py-2 md:py-4 animate-fade-in relative group/arena">
                 <div 
                   style={{ 
-                    width: `${Math.min(availableSlideSpace, 768)}px`,
-                    height: `${Math.min(availableSlideSpace, 768) * 9 / 16}px`
+                    width: `${canvasBoxWidth}px`,
+                    height: `${canvasBoxHeight}px`
                   }}
                   className={`shadow-2xl relative rounded-none overflow-hidden border border-neutral-800 bg-neutral-950 transition-shadow duration-300 ${
                     pptZoom > 1.0 ? 'cursor-grab active:cursor-grabbing ring-1 ring-amber-500/20' : 'cursor-default'
@@ -3980,8 +4644,8 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
                       position: 'absolute',
                       left: 0,
                       top: 0,
-                      width: '768px',
-                      height: '432px',
+                      width: `${slideNativeWidth}px`,
+                      height: `${slideNativeHeight}px`,
                       transform: `scale(${scaleFactor * pptZoom}) translate(${pptPan.x}px, ${pptPan.y}px)`,
                       transformOrigin: 'top left',
                     }}
@@ -3993,17 +4657,121 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
                       animate={{ opacity: 1, scale: 1, x: 0 }}
                       transition={{ duration: 0.35, ease: "easeOut" }}
                       className={`w-full h-full relative overflow-hidden select-text pointer-events-auto ${
-                        activeSlide.elements && activeSlide.elements.length > 0 ? "p-0" : "p-6 sm:p-8 md:p-10 flex flex-col justify-between"
+                        activeSlide.html ? "p-0" : activeSlide.elements && activeSlide.elements.length > 0 ? "p-0" : "p-6 sm:p-8 md:p-10 flex flex-col justify-between"
                       }`}
                       style={{
-                        backgroundColor: activeSlide.backgroundColor || '#ffffff',
+                        backgroundColor: (activeSlide.backgroundColor && !activeSlide.backgroundColor.includes('gradient')) 
+                          ? activeSlide.backgroundColor 
+                          : (activeSlide.backgroundColor ? undefined : '#ffffff'),
+                        background: (activeSlide.backgroundColor && activeSlide.backgroundColor.includes('gradient')) 
+                          ? activeSlide.backgroundColor 
+                          : undefined,
                         backgroundImage: activeSlide.backgroundImage ? `url(${activeSlide.backgroundImage})` : undefined,
                         backgroundSize: '100% 100%',
                         backgroundPosition: 'center',
                         backgroundRepeat: 'no-repeat'
                       }}
                     >
-                      {activeSlide.elements && activeSlide.elements.length > 0 ? (
+                      {activeSlide.html ? (
+                        <div className="w-full h-full relative overflow-hidden select-text pointer-events-auto pptx-render-root">
+                          <style>{`
+                            @font-face {
+                              font-family: 'Calibri';
+                              src: local('Calibri'), local('Carlito'), local('Carlito-Regular');
+                              font-weight: normal;
+                              font-style: normal;
+                            }
+                            @font-face {
+                              font-family: 'Calibri';
+                              src: local('Calibri Bold'), local('Carlito-Bold');
+                              font-weight: 700;
+                              font-style: normal;
+                            }
+                            @font-face {
+                              font-family: 'Arial';
+                              src: local('Arial'), local('Arimo'), local('Arimo-Regular');
+                              font-weight: normal;
+                              font-style: normal;
+                            }
+                            @font-face {
+                              font-family: 'Arial';
+                              src: local('Arial Bold'), local('Arimo-Bold');
+                              font-weight: 700;
+                              font-style: normal;
+                            }
+                            .pptx-render-root, .pptx-render-root * { 
+                              box-sizing: border-box; 
+                            }
+                            .pptx-render-root .slide-shell, 
+                            .pptx-render-root .slide, 
+                            .pptx-render-root .shape, 
+                            .pptx-render-root .paragraph { 
+                              margin: 0; 
+                            }
+                            .pptx-render-root {
+                              width: 100%;
+                              height: 100%;
+                              display: flex;
+                              align-items: center;
+                              justify-content: center;
+                              color: ${contrastColor};
+                              font-family: "Calibri", "Carlito", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+                              letter-spacing: -0.012em;
+                              text-rendering: optimizeLegibility;
+                              -webkit-font-smoothing: antialiased;
+                              -moz-osx-font-smoothing: grayscale;
+                              ${activeSlide.css || ''}
+                            }
+                            .pptx-render-root .slide {
+                              color: ${contrastColor};
+                              ${activeSlide.backgroundColor && activeSlide.backgroundColor.includes('gradient') ? `background: ${activeSlide.backgroundColor} !important;` : ''}
+                            }
+                            .pptx-render-root .paragraph {
+                              margin: 0 !important;
+                              line-height: 1.15 !important;
+                            }
+                            .pptx-render-root .run,
+                            .pptx-render-root .run-segment {
+                              line-height: 1.15 !important;
+                              letter-spacing: -0.012em;
+                            }
+                            .pptx-render-root .text-body {
+                              line-height: 1.15 !important;
+                              overflow-wrap: break-word;
+                              word-break: break-word;
+                            }
+                            .pptx-render-root svg {
+                              shape-rendering: geometricPrecision !important;
+                              text-rendering: geometricPrecision !important;
+                              image-rendering: -webkit-optimize-contrast;
+                              overflow: visible;
+                            }
+                            .pptx-render-root svg path,
+                            .pptx-render-root svg rect,
+                            .pptx-render-root svg circle,
+                            .pptx-render-root svg ellipse,
+                            .pptx-render-root svg line,
+                            .pptx-render-root svg polyline,
+                            .pptx-render-root svg polygon {
+                              shape-rendering: geometricPrecision !important;
+                              vector-effect: non-scaling-stroke;
+                            }
+                          `}</style>
+                          <div 
+                            className="w-full h-full select-text pointer-events-auto flex items-center justify-center"
+                            dangerouslySetInnerHTML={{ __html: activeSlide.html }}
+                          />
+                          {/* Slide counter watermark inside the elements overlay */}
+                          <div className="absolute bottom-3 right-3 select-none pointer-events-none z-10">
+                            <span 
+                              style={{ color: contrastColor, borderColor: `${contrastColor}25`, backgroundColor: `${contrastColor}05` }}
+                              className="px-2.5 py-0.5 text-[9px] md:text-[10px] font-bold font-mono rounded-lg border backdrop-blur-[2px]"
+                            >
+                              {currentSlideIdx + 1} / {slides.length}
+                            </span>
+                          </div>
+                        </div>
+                      ) : activeSlide.elements && activeSlide.elements.length > 0 ? (
                         (() => {
                           const slideTextColor = getContrastTextColor(activeSlide.backgroundColor || '#ffffff');
                           
@@ -4069,9 +4837,9 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
                                         left: `${el.x}%`,
                                         top: `${el.y}%`,
                                         width: `${el.w}%`,
-                                        minHeight: `${el.h}%`,
+                                        maxHeight: `${el.h}%`,
                                       }}
-                                      className="flex flex-col justify-start select-text leading-snug overflow-visible p-1 transition-all duration-300 text-left pointer-events-auto"
+                                      className="flex flex-col justify-start select-text leading-snug overflow-hidden p-1 transition-all duration-300 text-left pointer-events-auto"
                                     >
                                       {el.isTitle ? (
                                         <h4 
@@ -4244,7 +5012,12 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
                           setPlayingSlideshow(false);
                         }}
                         style={{
-                          backgroundColor: s.backgroundColor || '#ffffff',
+                          backgroundColor: (s.backgroundColor && !s.backgroundColor.includes('gradient')) 
+                            ? s.backgroundColor 
+                            : (s.backgroundColor ? undefined : '#ffffff'),
+                          background: (s.backgroundColor && s.backgroundColor.includes('gradient')) 
+                            ? s.backgroundColor 
+                            : undefined,
                           backgroundImage: s.backgroundImage ? `url(${s.backgroundImage})` : undefined,
                           backgroundSize: '100% 100%',
                           backgroundPosition: 'center',
@@ -4263,14 +5036,28 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
                             position: 'absolute',
                             left: 0,
                             top: 0,
-                            width: '768px',
-                            height: '432px',
-                            transform: 'scale(calc(100cqw / 768))',
+                            width: `${s.width || 960}px`,
+                            height: `${s.height || 540}px`,
+                            transform: `scale(calc(100cqw / ${s.width || 960}))`,
                             transformOrigin: 'top left',
                           }}
                           className="pointer-events-none overflow-hidden select-none z-0"
                         >
-                          {s.elements && s.elements.map((el: any, elIdx: number) => {
+                          {s.html ? (
+                            <div className="w-full h-full pptx-render-root">
+                              {s.css && (
+                                <style>{`
+                                  .pptx-render-root, .pptx-render-root * { box-sizing: border-box; }
+                                  .pptx-render-root .slide-shell, .pptx-render-root .slide, .pptx-render-root .shape, .pptx-render-root .paragraph { margin: 0; }
+                                  .pptx-render-root .paragraph, .pptx-render-root .run, .pptx-render-root .run-segment { line-height: 1.15 !important; letter-spacing: -0.012em; }
+                                  .pptx-render-root svg { shape-rendering: geometricPrecision !important; }
+                                  .pptx-render-root { ${s.css} }
+                                `}</style>
+                              )}
+                              <div dangerouslySetInnerHTML={{ __html: s.html }} />
+                            </div>
+                          ) : s.elements ? (
+                            s.elements.map((el: any, elIdx: number) => {
                             if (el.type === 'image') {
                               return (
                                 <div
@@ -4306,9 +5093,9 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
                                     left: `${el.x}%`,
                                     top: `${el.y}%`,
                                     width: `${el.w}%`,
-                                    minHeight: `${el.h}%`,
+                                    maxHeight: `${el.h}%`,
                                   }}
-                                  className="flex flex-col justify-start leading-snug overflow-visible p-1 text-left"
+                                  className="flex flex-col justify-start leading-snug overflow-hidden p-1 text-left"
                                 >
                                   {el.isTitle ? (
                                     <h4 
@@ -4348,7 +5135,8 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
                               );
                             }
                             return null;
-                          })}
+                          })
+                          ) : null}
                         </div>
 
                         {/* Soft ambient overlay at bottom to ensure metadata typography stands out regardless of slide elements */}
@@ -4401,7 +5189,10 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
                         <div className="flex items-center gap-1">
                           <span className="text-[9px] font-bold font-mono text-neutral-400">BG:</span>
                           <span 
-                            style={{ backgroundColor: s.backgroundColor }} 
+                            style={{ 
+                              background: s.backgroundColor && s.backgroundColor.includes('gradient') ? s.backgroundColor : undefined,
+                              backgroundColor: s.backgroundColor && !s.backgroundColor.includes('gradient') ? s.backgroundColor : undefined 
+                            }} 
                             className="w-3.5 h-3.5 rounded-full border border-neutral-700 inline-block shadow-sm"
                             title={`Slide background: ${s.backgroundColor}`}
                           />
@@ -4749,8 +5540,8 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {/* High-fidelity / Convert actions for PPT, Word, Excel, etc. */}
-          {(file.type === 'doc' || file.type === 'ppt' || file.type === 'xlsx') && file.id !== 'welcome-guide' && file.id !== 'sample-stats' && (
+          {/* High-fidelity / Convert actions for Word docs only (removed from PPT and Excel) */}
+          {file.type === 'doc' && file.id !== 'welcome-guide' && file.id !== 'sample-stats' && (
             <div className="flex items-center gap-1.5 sm:gap-2">
               <button
                 disabled={isConverting}
@@ -4764,7 +5555,7 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
               >
                 <Sparkles size={13} className={isHighFidelityMode ? "text-white animate-pulse" : "text-amber-500 animate-pulse"} />
                 <span className="hidden sm:inline">{isHighFidelityMode ? "Exit 100% Layout" : "100% Layout View"}</span>
-                <span className="sm:hidden">{isHighFidelityMode ? "Standard" : "100% A4 View"}</span>
+                <span className="sm:hidden">{isHighFidelityMode ? "Standard" : "100% View"}</span>
               </button>
 
               <button

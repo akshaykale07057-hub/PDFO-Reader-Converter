@@ -9,9 +9,12 @@ import { storageService } from '../services/storageService';
 import { adService } from '../services/adService';
 import { DocFile } from '../types';
 import { getTranslator } from '../utils/translator';
+import { isOnlineSync, checkIsOnline, triggerOfflineAlert, useNetworkStatus } from '../utils/networkUtils';
+import { OfflineBanner } from './OfflineAlertModal';
 
 export const MergeView: React.FC<{ language?: string }> = ({ language = 'English US' }) => {
   const t = getTranslator(language);
+  const isOnline = useNetworkStatus();
   const [files, setFiles] = useState<File[]>([]);
   const [isMerging, setIsMerging] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -113,6 +116,15 @@ export const MergeView: React.FC<{ language?: string }> = ({ language = 'English
 
   const handleMerge = async () => {
     if (files.length < 2) return;
+    if (!isOnlineSync()) {
+      triggerOfflineAlert();
+      return;
+    }
+    const online = await checkIsOnline();
+    if (!online) {
+      triggerOfflineAlert();
+      return;
+    }
     // Show interstitial ad before merge starts
     adService.showInterstitial(performMerge);
   };
@@ -133,6 +145,10 @@ export const MergeView: React.FC<{ language?: string }> = ({ language = 'English
         <h2 className="text-3xl font-display font-bold text-neutral-900 tracking-tight">{t('pdfMerge')}</h2>
         <p className="text-neutral-500 font-medium">{t('combineMultiplePdfsDesc')}</p>
       </div>
+
+      {!isOnline && (
+        <OfflineBanner language={language} className="mb-2" />
+      )}
 
       <div 
         {...getRootProps()} 

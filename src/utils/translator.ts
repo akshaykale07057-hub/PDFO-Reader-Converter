@@ -8,7 +8,7 @@ const EnglishBase: Record<string, string> = {
   qrScanner: "QR Scanner",
   settings: "Settings",
   close: "Close",
-  
+
   // Header & Titles
   pdfReader: "PDF Reader",
   allFiles: "All Files",
@@ -21,7 +21,7 @@ const EnglishBase: Record<string, string> = {
   noMatches: "No matches found for",
   NoDocumentsFound: "No Documents Found",
   noDocumentsFound: "No Documents Found",
-  
+
   // Toolbar Actions
   compress: "Compress",
   merge: "Merge",
@@ -29,8 +29,16 @@ const EnglishBase: Record<string, string> = {
   sizeConverter: "Size Converter",
   pdfMerge: "PDF Merge",
   splitPdf: "Split PDF",
-  
+
   // Main Tools List
+  excelToPdf: "Excel to PDF",
+  convertExcel: "Convert XLS/XLSX to PDF",
+  pdfToExcel: "PDF to Excel",
+  convertPdfToExcel: "Convert PDF to Excel",
+  rotatePdf: "Rotate PDF",
+  rotatePdfDesc: "Rotate PDF pages 90°, 180° or 270°",
+  editPdf: "Rotate PDF",
+  editPdfDesc: "Rotate PDF pages 90°, 180° or 270°",
   compressPdf: "Compress PDF",
   reduceSize: "Reduce file size",
   mergePdfLabel: "Merge PDF",
@@ -48,7 +56,11 @@ const EnglishBase: Record<string, string> = {
   protectPdf: "Protect PDF",
   addPassword: "Add password to PDF",
   extraFeatures: "Extra features for your documents",
-  
+  youAreOffline: "You are offline",
+  offlineConvertNotice: "Without online you not convert any document",
+  connectInternetNotice: "Please connect to the internet to convert, compress, merge or modify documents.",
+  ok: "OK",
+
   // File Details Overlay
   format: "Format",
   openDocument: "Open Document",
@@ -109,7 +121,7 @@ const EnglishBase: Record<string, string> = {
   rateApp: "Rate app",
   feedback: "Feedback",
   privacyPolicy: "Privacy and policy",
-  
+
   // Sub-Settings / Pro modals
   allDocumentsReader: "All Documents Reader",
   removeAllAds: "Remove All Ads",
@@ -187,7 +199,7 @@ const EnglishBase: Record<string, string> = {
   autoSavedHomeLib: "Your file has been automatically saved to the Home library.",
   convertSize: "Convert Size",
   processingImageData: "Processing image data...",
-  
+
   // File list & actions translations
   renameFile: "Rename File",
   delete: "Delete",
@@ -233,6 +245,14 @@ export const TRANSLATIONS: Record<string, Record<string, string>> = {
     sizeConverter: "साइज कनवर्टर",
     pdfMerge: "पीडीएफ मर्ज",
     splitPdf: "स्प्लिट पीडीएफ",
+    excelToPdf: "एक्सेल से पीडीएफ",
+    convertExcel: "XLS/XLSX को PDF में बदलें",
+    pdfToExcel: "पीडीएफ से एक्सेल",
+    convertPdfToExcel: "PDF को Excel में बदलें",
+    rotatePdf: "पीडीएफ घुमाएं (Rotate PDF)",
+    rotatePdfDesc: "PDF पेज 90°, 180° या 270° घुमाएं",
+    editPdf: "पीडीएफ घुमाएं (Rotate PDF)",
+    editPdfDesc: "PDF पेज 90°, 180° या 270° घुमाएं",
     compressPdf: "पीडीएफ कंप्रेस करें",
     reduceSize: "फाइल का आकार कम करें",
     mergePdfLabel: "मर्ज पीडीएफ",
@@ -249,6 +269,10 @@ export const TRANSLATIONS: Record<string, Record<string, string>> = {
     convertPdf: "PDF को DOC में बदलें",
     protectPdf: "पीडीएफ सुरक्षित करें",
     addPassword: "पासवर्ड जोड़ें",
+    youAreOffline: "आप ऑफ़लाइन हैं",
+    offlineConvertNotice: "बिना इंटरनेट आप किसी भी दस्तावेज़ को कनवर्ट नहीं कर सकते",
+    connectInternetNotice: "दस्तावेज़ों को बदलने, कंप्रेस, मर्ज या सुरक्षित करने के लिए कृपया इंटरनेट से कनेक्ट करें।",
+    ok: "ठीक है",
     extraFeatures: "दस्तावेज़ों के लिए अतिरिक्त सुविधाएँ",
     format: "प्रारूप",
     openDocument: "दस्तावेज़ खोलें",
